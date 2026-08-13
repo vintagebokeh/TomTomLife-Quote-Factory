@@ -24,14 +24,40 @@ export class MockMeaningService implements IMeaningService {
   }
 }
 
-export class MockScriptService implements IScriptService {
-  async generateScripts(coreMeaning: string): Promise<ScriptVariants> {
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    return {
-      scriptA: "The biggest risk is not taking any risk. In a rapidly changing world, playing it safe is the only guaranteed way to fail. Don't be reckless, but make smart bets and move fast. Your future depends on it.",
-      scriptB: "Are you avoiding risks? Think again. In a fast-changing world, the only strategy guaranteed to fail is standing still. It's not about being reckless—it's about calculated bets and speed.",
-      scriptC: "If you don't take risks, you've already failed. The world moves too fast for comfort zones. Make smart, calculated bets. Move fast. Take the risk or lose the chance."
-    };
+export class RealScriptService implements IScriptService {
+  async generateScripts(
+    cleanText: string,
+    coreMeaning: string,
+    language: string,
+    options?: {
+      scriptProcessRunCount: number;
+      cumulativeScriptInputTokens: number;
+      cumulativeScriptOutputTokens: number;
+      cumulativeScriptTotalTokens: number;
+    }
+  ): Promise<any> {
+    const response = await fetch("/api/generate-scripts", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        cleanText,
+        coreMeaning,
+        language,
+        scriptProcessRunCount: options?.scriptProcessRunCount || 0,
+        cumulativeScriptInputTokens: options?.cumulativeScriptInputTokens || 0,
+        cumulativeScriptOutputTokens: options?.cumulativeScriptOutputTokens || 0,
+        cumulativeScriptTotalTokens: options?.cumulativeScriptTotalTokens || 0
+      })
+    });
+
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      throw new Error(errData.message || `HTTP ${response.status}: Failed to generate scripts`);
+    }
+
+    return await response.json();
   }
 }
 
@@ -58,7 +84,7 @@ export class MockVideoService implements IVideoService {
 export const services = {
   ocr: new MockOcrService(),
   meaning: new MockMeaningService(),
-  script: new MockScriptService(),
+  script: new RealScriptService(),
   voice: new MockVoiceService(),
   video: new MockVideoService()
 };

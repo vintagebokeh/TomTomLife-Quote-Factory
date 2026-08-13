@@ -38,6 +38,18 @@ export interface QuoteJobRow {
   cumulative_output_tokens?: number;
   cumulative_total_tokens?: number;
   estimated_cost?: number | null;
+  // Build 6 Stage 4 Observability & Accounting Patch Columns
+  script_process_run_count?: number;
+  last_script_process_at?: string | null;
+  last_script_input_tokens?: number | null;
+  last_script_output_tokens?: number | null;
+  last_script_total_tokens?: number | null;
+  last_script_latency_ms?: number | null;
+  cumulative_script_input_tokens?: number;
+  cumulative_script_output_tokens?: number;
+  cumulative_script_total_tokens?: number;
+  script_estimated_cost?: number | null;
+  language?: string;
 }
 
 export function mapRowToJob(row: QuoteJobRow): QuoteJob {
@@ -82,6 +94,18 @@ export function mapRowToJob(row: QuoteJobRow): QuoteJob {
     cumulativeOutputTokens: row.cumulative_output_tokens ?? 0,
     cumulativeTotalTokens: row.cumulative_total_tokens ?? 0,
     estimatedCost: row.estimated_cost || null,
+    // Build 6 Stage 4 Observability & Accounting Patch Mappings
+    scriptProcessRunCount: row.script_process_run_count ?? 0,
+    lastScriptProcessAt: row.last_script_process_at || null,
+    lastScriptInputTokens: row.last_script_input_tokens || null,
+    lastScriptOutputTokens: row.last_script_output_tokens || null,
+    lastScriptTotalTokens: row.last_script_total_tokens || null,
+    lastScriptLatencyMs: row.last_script_latency_ms || null,
+    cumulativeScriptInputTokens: row.cumulative_script_input_tokens ?? 0,
+    cumulativeScriptOutputTokens: row.cumulative_script_output_tokens ?? 0,
+    cumulativeScriptTotalTokens: row.cumulative_script_total_tokens ?? 0,
+    scriptEstimatedCost: row.script_estimated_cost || null,
+    language: row.language || "en",
   };
 }
 
@@ -112,6 +136,18 @@ export function mapJobToRow(job: QuoteJob): QuoteJobRow {
     cumulative_output_tokens: job.cumulativeOutputTokens,
     cumulative_total_tokens: job.cumulativeTotalTokens,
     estimated_cost: job.estimatedCost || null,
+    // Build 6 Stage 4 Observability & Accounting Patch Mappings
+    script_process_run_count: job.scriptProcessRunCount,
+    last_script_process_at: job.lastScriptProcessAt || null,
+    last_script_input_tokens: job.lastScriptInputTokens || null,
+    last_script_output_tokens: job.lastScriptOutputTokens || null,
+    last_script_total_tokens: job.lastScriptTotalTokens || null,
+    last_script_latency_ms: job.lastScriptLatencyMs || null,
+    cumulative_script_input_tokens: job.cumulativeScriptInputTokens,
+    cumulative_script_output_tokens: job.cumulativeScriptOutputTokens,
+    cumulative_script_total_tokens: job.cumulativeScriptTotalTokens,
+    script_estimated_cost: job.scriptEstimatedCost || null,
+    language: job.language || "en",
   };
 }
 

@@ -38,5 +38,17 @@ export const initialMockJob: QuoteJob = {
   cumulativeInputTokens: 0,
   cumulativeOutputTokens: 0,
   cumulativeTotalTokens: 0,
-  estimatedCost: null
+  estimatedCost: null,
+  // Build 6 Stage 4 Observability & Accounting Patch Initializers
+  scriptProcessRunCount: 0,
+  lastScriptProcessAt: null,
+  lastScriptInputTokens: null,
+  lastScriptOutputTokens: null,
+  lastScriptTotalTokens: null,
+  lastScriptLatencyMs: null,
+  cumulativeScriptInputTokens: 0,
+  cumulativeScriptOutputTokens: 0,
+  cumulativeScriptTotalTokens: 0,
+  scriptEstimatedCost: null,
+  language: "en"
 };

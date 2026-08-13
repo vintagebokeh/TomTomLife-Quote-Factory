@@ -31,6 +31,12 @@ export default function App() {
   // Main state holding the active job
   const [job, setJob] = useState<QuoteJob>({ ...initialMockJob });
 
+  // Ref tracking the absolute freshest job state to prevent stale asynchronous closures
+  const jobRef = useRef<QuoteJob>(job);
+  useEffect(() => {
+    jobRef.current = job;
+  }, [job]);
+
   // Build 3 Local File Intake & Extraction States
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [sourcePreviewUrl, setSourcePreviewUrl] = useState<string | null>(null);
@@ -51,6 +57,26 @@ export default function App() {
     cleanText: string;
     coreMeaning: string;
     language: string;
+    provenance?: {
+      provider: string;
+      model: string;
+      live_model_used: string;
+      processed_at: string;
+      latency_ms: number;
+      input_tokens: number | null;
+      output_tokens: number | null;
+      total_tokens: number | null;
+    };
+  } | null>(null);
+
+  // Build 6 Stage 4 Script Processing States
+  const [autoAcceptAiScript, setAutoAcceptAiScript] = useState<boolean>(false);
+  const [scriptProcessingStatus, setScriptProcessingStatus] = useState<"IDLE" | "PROCESSING" | "SUCCESS" | "FAILED">("IDLE");
+  const [scriptProcessingError, setScriptProcessingError] = useState<string | null>(null);
+  const [scriptCandidates, setScriptCandidates] = useState<{
+    scriptA: string;
+    scriptB: string;
+    scriptC: string;
     provenance?: {
       provider: string;
       model: string;
@@ -315,31 +341,23 @@ export default function App() {
         });
         notify("Clean Text compiled and formatted.", "success");
       } else if (job.status === "TEXT_READY") {
-        // Extract meaning
-        const coreMeaning = await services.meaning.extractCoreMeaning(job.cleanText);
-        setJob((prev) => {
-          const next = {
-            ...prev,
-            coreMeaning,
-            status: "SCRIPT_READY" as JobStatus
-          };
-          nextJob = next;
-          return next;
-        });
-        notify("Core Meaning synthesized.", "success");
+        // Halt simulator for manual/real Gemma script generation
+        setIsSimulating(false);
+        notify("Script generation is a real Gemma action in Build 6. Please run Stage 4 Script Generation manually to continue.", "info");
+        return;
       } else if (job.status === "SCRIPT_READY") {
-        // Generate scripts
-        const scripts = await services.script.generateScripts(job.coreMeaning);
+        // Voice Slot synthesis (Stage 5)
         setJob((prev) => {
           const next = {
             ...prev,
-            scripts,
-            status: "AUDIO_READY" as JobStatus
+            femaleVoice: { ...prev.femaleVoice, status: "GENERATED" as const },
+            maleVoice: { ...prev.maleVoice, status: "GENERATED" as const },
+            status: "VIDEO_READY" as JobStatus
           };
           nextJob = next;
           return next;
         });
-        notify("Three creative scripts drafted.", "success");
+        notify("V1 Voice slots generated successfully.", "success");
       } else if (job.status === "AUDIO_READY") {
         // Voice Slot synthesis
         setJob((prev) => {
@@ -837,25 +855,54 @@ export default function App() {
     }
   };
 
+  // Helper to invalidate downstream scripts and voice slot states when upstream text changes
+  const invalidateScriptsAndDownstream = (prevJob: QuoteJob): QuoteJob => {
+    return {
+      ...prevJob,
+      scripts: {
+        scriptA: "",
+        scriptB: "",
+        scriptC: ""
+      },
+      femaleVoice: {
+        ...prevJob.femaleVoice,
+        status: "PENDING",
+        audioUrl: undefined
+      },
+      maleVoice: {
+        ...prevJob.maleVoice,
+        status: "PENDING",
+        audioUrl: undefined
+      },
+      status: "TEXT_READY"
+    };
+  };
+
   // Update handlers for edited values
   const handleCleanTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setScriptCandidates(null);
     setJob((prev) => {
-      const next = { ...prev, cleanText: e.target.value };
+      const invalidated = invalidateScriptsAndDownstream(prev);
+      const next = { ...invalidated, cleanText: e.target.value };
       setHasUnsavedChanges(true);
       return next;
     });
   };
 
   const handleCoreMeaningChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setScriptCandidates(null);
     setJob((prev) => {
-      const next = { ...prev, coreMeaning: e.target.value };
+      const invalidated = invalidateScriptsAndDownstream(prev);
+      const next = { ...invalidated, coreMeaning: e.target.value };
       setHasUnsavedChanges(true);
       return next;
     });
   };
 
   const handleRunTextProcessing = async () => {
-    if (!job.rawOcr || job.rawOcr.trim() === "") {
+    // Access freshest state using jobRef to avoid stale closures
+    const currentJob = jobRef.current;
+    if (!currentJob.rawOcr || currentJob.rawOcr.trim() === "") {
       notify("Text Processing requires non-empty Raw OCR text. Please run OCR first.", "error");
       return;
     }
@@ -867,10 +914,10 @@ export default function App() {
     notify("Sending Raw OCR to server-side Gemma 4 26B A4B engine...", "info");
 
     try {
-      // Set status to TEXT_PROCESSING
+      // Set status to OCR_READY
       setJob((prev) => ({
         ...prev,
-        status: "TEXT_PROCESSING"
+        status: "OCR_READY"
       }));
 
       const response = await fetch("/api/text-process", {
@@ -879,11 +926,11 @@ export default function App() {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          rawOcrText: job.rawOcr,
-          textProcessRunCount: job.textProcessRunCount || 0,
-          cumulativeInputTokens: job.cumulativeInputTokens || 0,
-          cumulativeOutputTokens: job.cumulativeOutputTokens || 0,
-          cumulativeTotalTokens: job.cumulativeTotalTokens || 0
+          rawOcrText: currentJob.rawOcr,
+          textProcessRunCount: currentJob.textProcessRunCount || 0,
+          cumulativeInputTokens: currentJob.cumulativeInputTokens || 0,
+          cumulativeOutputTokens: currentJob.cumulativeOutputTokens || 0,
+          cumulativeTotalTokens: currentJob.cumulativeTotalTokens || 0
         }),
         credentials: "include"
       });
@@ -902,18 +949,24 @@ export default function App() {
       const data = await response.json();
       if (!response.ok) {
         // If there's an invocation run count in the error response, we must increment and save it!
+        let finalRunCount = jobRef.current.textProcessRunCount;
         if (data && typeof data.textProcessRunCount === "number") {
-          setJob((prev) => {
-            const nextJob = {
-              ...prev,
-              textProcessRunCount: data.textProcessRunCount
-            };
-            if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
-              saveJobToDb(nextJob).catch(err => console.error("Failed to save failed run count:", err));
-            }
-            return nextJob;
-          });
+          finalRunCount = data.textProcessRunCount;
         }
+
+        const failedJob: QuoteJob = {
+          ...jobRef.current,
+          status: "FAILED",
+          failedStage: "TEXT",
+          errorMessage: data.message || data.error || `Server responded with status ${response.status}`,
+          textProcessRunCount: finalRunCount
+        };
+
+        setJob(failedJob);
+        if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+          await saveJobToDb(failedJob);
+        }
+
         throw new Error(data.message || data.error || `Server responded with status ${response.status}`);
       }
 
@@ -934,21 +987,24 @@ export default function App() {
 
       setAiCandidate(candidateData);
 
+      // Fetch freshest current job reference before updating
+      const freshJob = jobRef.current;
+
       if (autoAcceptAiText) {
         const updatedJob: QuoteJob = {
-          ...job,
+          ...freshJob,
           status: "TEXT_READY",
           cleanText: clean_text,
           coreMeaning: core_meaning,
-          textProcessRunCount: data.textProcessRunCount ?? ((job.textProcessRunCount || 0) + 1),
+          textProcessRunCount: data.textProcessRunCount ?? ((freshJob.textProcessRunCount || 0) + 1),
           lastTextProcessAt: data.last_text_process_at || new Date().toISOString(),
           lastInputTokens: data.last_input_tokens,
           lastOutputTokens: data.last_output_tokens,
           lastTotalTokens: data.last_total_tokens,
           lastLatencyMs: data.last_latency_ms,
-          cumulativeInputTokens: data.cumulative_input_tokens ?? (job.cumulativeInputTokens || 0),
-          cumulativeOutputTokens: data.cumulative_output_tokens ?? (job.cumulativeOutputTokens || 0),
-          cumulativeTotalTokens: data.cumulative_total_tokens ?? (job.cumulativeTotalTokens || 0),
+          cumulativeInputTokens: data.cumulative_input_tokens ?? (freshJob.cumulativeInputTokens || 0),
+          cumulativeOutputTokens: data.cumulative_output_tokens ?? (freshJob.cumulativeOutputTokens || 0),
+          cumulativeTotalTokens: data.cumulative_total_tokens ?? (freshJob.cumulativeTotalTokens || 0),
           estimatedCost: data.estimated_cost || null
         };
         delete updatedJob.failedStage;
@@ -962,17 +1018,17 @@ export default function App() {
         }
       } else {
         const updatedJob: QuoteJob = {
-          ...job,
-          status: "TEXT_PROCESSING",
-          textProcessRunCount: data.textProcessRunCount ?? ((job.textProcessRunCount || 0) + 1),
+          ...freshJob,
+          status: "OCR_READY",
+          textProcessRunCount: data.textProcessRunCount ?? ((freshJob.textProcessRunCount || 0) + 1),
           lastTextProcessAt: data.last_text_process_at || new Date().toISOString(),
           lastInputTokens: data.last_input_tokens,
           lastOutputTokens: data.last_output_tokens,
           lastTotalTokens: data.last_total_tokens,
           lastLatencyMs: data.last_latency_ms,
-          cumulativeInputTokens: data.cumulative_input_tokens ?? (job.cumulativeInputTokens || 0),
-          cumulativeOutputTokens: data.cumulative_output_tokens ?? (job.cumulativeOutputTokens || 0),
-          cumulativeTotalTokens: data.cumulative_total_tokens ?? (job.cumulativeTotalTokens || 0),
+          cumulativeInputTokens: data.cumulative_input_tokens ?? (freshJob.cumulativeInputTokens || 0),
+          cumulativeOutputTokens: data.cumulative_output_tokens ?? (freshJob.cumulativeOutputTokens || 0),
+          cumulativeTotalTokens: data.cumulative_total_tokens ?? (freshJob.cumulativeTotalTokens || 0),
           estimatedCost: data.estimated_cost || null
         };
         setJob(updatedJob);
@@ -988,17 +1044,23 @@ export default function App() {
       setTextProcessingStatus("FAILED");
       setTextProcessingError(errMsg);
 
-      const failedJob: QuoteJob = {
-        ...job,
-        status: "FAILED",
-        failedStage: "TEXT",
-        errorMessage: errMsg
-      };
-      setJob(failedJob);
-      notify(`Text Processing Failure: ${errMsg}`, "error");
+      // Only set to FAILED if not already set by response.ok handler above
+      const current = jobRef.current;
+      if (current.status !== "FAILED") {
+        const failedJob: QuoteJob = {
+          ...current,
+          status: "FAILED",
+          failedStage: "TEXT",
+          errorMessage: errMsg
+        };
+        setJob(failedJob);
+        notify(`Text Processing Failure: ${errMsg}`, "error");
 
-      if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
-        await saveJobToDb(failedJob);
+        if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+          await saveJobToDb(failedJob);
+        }
+      } else {
+        notify(`Text Processing Failure: ${errMsg}`, "error");
       }
     }
   };
@@ -1010,7 +1072,7 @@ export default function App() {
     }
 
     const updatedJob: QuoteJob = {
-      ...job,
+      ...jobRef.current,
       status: "TEXT_READY",
       cleanText: aiCandidate.cleanText,
       coreMeaning: aiCandidate.coreMeaning
@@ -1026,6 +1088,214 @@ export default function App() {
     }
   };
 
+  const handleRunScriptGeneration = async () => {
+    const currentJob = jobRef.current;
+    if (!currentJob.cleanText || currentJob.cleanText.trim() === "" ||
+        !currentJob.coreMeaning || currentJob.coreMeaning.trim() === "") {
+      notify("Script Generation requires non-empty accepted clean text and core meaning. Please complete text processing first.", "error");
+      return;
+    }
+
+    setScriptProcessingStatus("PROCESSING");
+    setScriptProcessingError(null);
+    setScriptCandidates(null);
+
+    notify("Sending accepted content to server-side Script Generation engine...", "info");
+
+    try {
+      const response = await fetch("/api/generate-scripts", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          cleanText: currentJob.cleanText,
+          coreMeaning: currentJob.coreMeaning,
+          language: currentJob.language || "en",
+          scriptProcessRunCount: currentJob.scriptProcessRunCount || 0,
+          cumulativeScriptInputTokens: currentJob.cumulativeScriptInputTokens || 0,
+          cumulativeScriptOutputTokens: currentJob.cumulativeScriptOutputTokens || 0,
+          cumulativeScriptTotalTokens: currentJob.cumulativeScriptTotalTokens || 0
+        }),
+        credentials: "include"
+      });
+
+      if (response.redirected || (response.url && (response.url.includes("cookie_check") || response.url.includes("aistudio.google.com")))) {
+        throw new Error("AI Studio Preview authentication required. Please ensure cookies are allowed or reload the application.");
+      }
+
+      const contentType = response.headers.get("Content-Type") || "";
+      if (!contentType.includes("application/json")) {
+        const rawResText = await response.text();
+        const snippet = rawResText.substring(0, 300);
+        throw new Error(`Received non-JSON response from server.\nHTTP Status: ${response.status}\nSnippet: ${snippet}`);
+      }
+
+      const data = await response.json();
+      if (!response.ok) {
+        let finalRunCount = jobRef.current.scriptProcessRunCount;
+        if (data && typeof data.scriptProcessRunCount === "number") {
+          finalRunCount = data.scriptProcessRunCount;
+        }
+
+        const failedJob: QuoteJob = {
+          ...jobRef.current,
+          status: "FAILED",
+          failedStage: "SCRIPT",
+          errorMessage: data.message || data.error || `Server responded with status ${response.status}`,
+          scriptProcessRunCount: finalRunCount
+        };
+
+        setJob(failedJob);
+        if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+          await saveJobToDb(failedJob);
+        }
+
+        throw new Error(data.message || data.error || `Server responded with status ${response.status}`);
+      }
+
+      const { script_a, script_b, script_c } = data;
+
+      if (!script_a || !script_b || !script_c) {
+        throw new Error("Invalid structure returned from the Script Generation API.");
+      }
+
+      setScriptProcessingStatus("SUCCESS");
+
+      const candidateData = {
+        scriptA: script_a.text,
+        scriptB: script_b.text,
+        scriptC: script_c.text,
+        provenance: data.provenance
+      };
+
+      const freshJob = jobRef.current;
+
+      if (autoAcceptAiScript) {
+        const updatedJob: QuoteJob = {
+          ...freshJob,
+          status: "SCRIPT_READY",
+          scripts: {
+            scriptA: script_a.text,
+            scriptB: script_b.text,
+            scriptC: script_c.text
+          },
+          femaleVoice: {
+            ...freshJob.femaleVoice,
+            status: "PENDING",
+            audioUrl: undefined
+          },
+          maleVoice: {
+            ...freshJob.maleVoice,
+            status: "PENDING",
+            audioUrl: undefined
+          },
+          scriptProcessRunCount: data.script_process_run_count ?? ((freshJob.scriptProcessRunCount || 0) + 1),
+          lastScriptProcessAt: data.last_script_process_at || new Date().toISOString(),
+          lastScriptInputTokens: data.last_script_input_tokens,
+          lastScriptOutputTokens: data.last_script_output_tokens,
+          lastScriptTotalTokens: data.last_script_total_tokens,
+          lastScriptLatencyMs: data.last_script_latency_ms,
+          cumulativeScriptInputTokens: data.cumulative_script_input_tokens ?? (freshJob.cumulativeScriptInputTokens || 0),
+          cumulativeScriptOutputTokens: data.cumulative_script_output_tokens ?? (freshJob.cumulativeScriptOutputTokens || 0),
+          cumulativeScriptTotalTokens: data.cumulative_script_total_tokens ?? (freshJob.cumulativeScriptTotalTokens || 0),
+          scriptEstimatedCost: data.script_estimated_cost || null
+        };
+        delete updatedJob.failedStage;
+        delete updatedJob.errorMessage;
+
+        setJob(updatedJob);
+        notify("Gemma Script Generation succeeded & auto-accepted!", "success");
+
+        if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+          await saveJobToDb(updatedJob);
+        }
+      } else {
+        setScriptCandidates(candidateData);
+        const updatedJob: QuoteJob = {
+          ...freshJob,
+          scriptProcessRunCount: data.script_process_run_count ?? ((freshJob.scriptProcessRunCount || 0) + 1),
+          lastScriptProcessAt: data.last_script_process_at || new Date().toISOString(),
+          lastScriptInputTokens: data.last_script_input_tokens,
+          lastScriptOutputTokens: data.last_script_output_tokens,
+          lastScriptTotalTokens: data.last_script_total_tokens,
+          lastScriptLatencyMs: data.last_script_latency_ms,
+          cumulativeScriptInputTokens: data.cumulative_script_input_tokens ?? (freshJob.cumulativeScriptInputTokens || 0),
+          cumulativeScriptOutputTokens: data.cumulative_script_output_tokens ?? (freshJob.cumulativeScriptOutputTokens || 0),
+          cumulativeScriptTotalTokens: data.cumulative_script_total_tokens ?? (freshJob.cumulativeScriptTotalTokens || 0),
+          scriptEstimatedCost: data.script_estimated_cost || null
+        };
+        setJob(updatedJob);
+        notify("Gemma generated scripts successfully! Awaiting manual approval.", "success");
+
+        if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+          await saveJobToDb(updatedJob);
+        }
+      }
+
+    } catch (err: any) {
+      const errMsg = err.message || "Failed to generate scripts.";
+      setScriptProcessingStatus("FAILED");
+      setScriptProcessingError(errMsg);
+
+      const current = jobRef.current;
+      if (current.status !== "FAILED") {
+        const failedJob: QuoteJob = {
+          ...current,
+          status: "FAILED",
+          failedStage: "SCRIPT",
+          errorMessage: errMsg
+        };
+        setJob(failedJob);
+        notify(`Script Generation Failure: ${errMsg}`, "error");
+
+        if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+          await saveJobToDb(failedJob);
+        }
+      } else {
+        notify(`Script Generation Failure: ${errMsg}`, "error");
+      }
+    }
+  };
+
+  const handleAcceptAiScripts = async () => {
+    if (!scriptCandidates) {
+      notify("No AI script candidates to accept.", "error");
+      return;
+    }
+
+    const freshJob = jobRef.current;
+    const updatedJob: QuoteJob = {
+      ...freshJob,
+      status: "SCRIPT_READY",
+      scripts: {
+        scriptA: scriptCandidates.scriptA,
+        scriptB: scriptCandidates.scriptB,
+        scriptC: scriptCandidates.scriptC
+      },
+      femaleVoice: {
+        ...freshJob.femaleVoice,
+        status: "PENDING",
+        audioUrl: undefined
+      },
+      maleVoice: {
+        ...freshJob.maleVoice,
+        status: "PENDING",
+        audioUrl: undefined
+      }
+    };
+    delete updatedJob.failedStage;
+    delete updatedJob.errorMessage;
+
+    setJob(updatedJob);
+    setScriptCandidates(null);
+    notify("AI Script Candidates accepted & synced to canonical fields successfully!", "success");
+
+    if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+      await saveJobToDb(updatedJob);
+    }
+  };
+
   const handleScriptChange = (variant: "scriptA" | "scriptB" | "scriptC", text: string) => {
     setJob((prev) => {
       const next = {
@@ -1033,6 +1303,16 @@ export default function App() {
         scripts: {
           ...prev.scripts,
           [variant]: text
+        },
+        femaleVoice: {
+          ...prev.femaleVoice,
+          status: "PENDING" as const,
+          audioUrl: undefined
+        },
+        maleVoice: {
+          ...prev.maleVoice,
+          status: "PENDING" as const,
+          audioUrl: undefined
         }
       };
       setHasUnsavedChanges(true);
@@ -2026,6 +2306,200 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                 <p className="text-[11px] text-slate-500 mb-4">
                   These 3 distinct short-form vertical video script structures are optimized for dynamic subtitles and hook-driven viewing behavior. Edit them independently.
                 </p>
+
+                {/* Stage 4 Gemma Processing Control Panel */}
+                <div className="bg-slate-50/60 rounded-xl p-4 border border-slate-200/80 mb-6 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-3 border-b border-slate-200/40">
+                    <div>
+                      <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+                        <Activity className="h-4 w-4 text-blue-600" />
+                        Stage 4 Script Generation Engine
+                      </h4>
+                      <p className="text-[10px] text-slate-500 mt-0.5">
+                        Convert accepted core meaning and clean text into 3 production script candidates in target source language.
+                      </p>
+                    </div>
+
+                    <div className="shrink-0 flex items-center gap-2">
+                      <span className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 px-2.5 py-1 rounded-full text-[10px] font-black uppercase border border-blue-200">
+                        Target Language: {(job.language || "en").toUpperCase()}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Toggle for Auto-Accept */}
+                  <div className="flex items-center justify-between p-3 bg-white border border-slate-200/60 rounded-xl">
+                    <div>
+                      <span className="text-[11px] font-black text-slate-700 block uppercase tracking-wider">AI Auto-Accept Scripts</span>
+                      <span className="text-[9px] text-slate-400 block mt-0.5">When enabled, generated Gemma script candidates commit automatically to canonical production fields.</span>
+                    </div>
+                    <button
+                      onClick={() => setAutoAcceptAiScript(!autoAcceptAiScript)}
+                      className={`relative inline-flex h-5.5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${autoAcceptAiScript ? "bg-blue-600" : "bg-slate-300"}`}
+                      type="button"
+                      role="switch"
+                      id="toggle-auto-accept-script"
+                      aria-label="AI Auto-Accept Scripts toggle"
+                    >
+                      <span className={`pointer-events-none inline-block h-4.5 w-4.5 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${autoAcceptAiScript ? "translate-x-4.5" : "translate-x-0"}`} />
+                    </button>
+                  </div>
+
+                  {/* Execution Row */}
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 p-3.5 border border-blue-100 bg-blue-50/25 rounded-xl">
+                    <div>
+                      <span className="text-[10px] font-black text-blue-800 uppercase tracking-widest block mb-1">Gemma Script Pipeline</span>
+                      <p className="text-xs text-slate-600 font-semibold leading-relaxed">
+                        Trigger Gemma model gemma-4-26b-a4b-it to author three specific hook variants natively in the target language.
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleRunScriptGeneration}
+                      disabled={scriptProcessingStatus === "PROCESSING" || !job.cleanText || !job.coreMeaning}
+                      className="shrink-0 inline-flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-black px-4.5 py-2.5 rounded-lg text-[10px] uppercase tracking-widest transition cursor-pointer shadow-xs whitespace-nowrap"
+                      id="btn-run-script-generation"
+                    >
+                      <Sparkles className={`h-3.5 w-3.5 shrink-0 ${scriptProcessingStatus === "PROCESSING" ? "animate-spin" : ""}`} />
+                      <span>
+                        {scriptProcessingStatus === "PROCESSING"
+                          ? "Generating..."
+                          : (!job.cleanText || !job.coreMeaning)
+                          ? "Text Required"
+                          : "Run Stage 4 Generation"}
+                      </span>
+                    </button>
+                  </div>
+
+                  {/* Stage 4 Observability Accounting Table */}
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-3.5 p-3.5 bg-white border border-slate-200 rounded-xl text-xs font-mono">
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Runs</span>
+                      <span className="text-slate-800 font-bold mt-0.5">{job.scriptProcessRunCount || 0}</span>
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Last Latency</span>
+                      <span className="text-slate-800 font-bold mt-0.5">
+                        {job.lastScriptLatencyMs ? `${(job.lastScriptLatencyMs / 1000).toFixed(1)} s` : "N/A"}
+                      </span>
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Last Tokens</span>
+                      <span className="text-slate-800 font-bold mt-0.5">
+                        {job.lastScriptTotalTokens ? job.lastScriptTotalTokens.toLocaleString() : "N/A"}
+                      </span>
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cumulative Tokens</span>
+                      <span className="text-slate-800 font-bold mt-0.5">
+                        {job.cumulativeScriptTotalTokens ? job.cumulativeScriptTotalTokens.toLocaleString() : 0}
+                      </span>
+                    </div>
+                    <div className="flex flex-col col-span-2 sm:col-span-1">
+                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cost</span>
+                      <span className="text-slate-500 font-bold mt-0.5">N/A</span>
+                    </div>
+                  </div>
+
+                  {/* Loading/Status banner */}
+                  {scriptProcessingStatus === "PROCESSING" && (
+                    <div className="bg-blue-50/50 border border-blue-100 rounded-lg p-3.5 flex items-center gap-2.5 animate-pulse">
+                      <Sparkles className="h-5 w-5 text-blue-600 shrink-0 animate-spin" />
+                      <p className="text-xs text-blue-950 font-semibold">
+                        Invoking Gemma 4 26B A4B model... Directing core semantic message into exactly three delivery variants...
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Error Banner */}
+                  {scriptProcessingStatus === "FAILED" && (
+                    <div className="bg-rose-50 border border-rose-100 rounded-lg p-3.5 flex items-center gap-2.5">
+                      <XCircle className="h-5 w-5 text-rose-600 shrink-0" />
+                      <p className="text-xs text-rose-950 font-semibold">
+                        Script Generation Failed: <span className="font-bold">{scriptProcessingError || job.errorMessage}</span>
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Auto-Accept Success Banner */}
+                  {scriptProcessingStatus === "SUCCESS" && autoAcceptAiScript && (
+                    <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-3.5 flex items-center gap-2.5">
+                      <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
+                      <div>
+                        <p className="text-xs text-emerald-950 font-bold">Gemma script candidates succeeded and committed automatically!</p>
+                        {scriptCandidates?.provenance && (
+                          <p className="text-[10px] text-emerald-800 mt-0.5">
+                            Latency: {scriptCandidates.provenance.latency_ms} ms | Language: {(job.language || "en").toUpperCase()} | Tokens: P:{scriptCandidates.provenance.input_tokens || "N/A"} C:{scriptCandidates.provenance.output_tokens || "N/A"}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* AI Candidates Review Card */}
+                  {!autoAcceptAiScript && scriptCandidates && (
+                    <div className="border border-dashed border-blue-300 bg-blue-50/10 rounded-xl p-4.5 space-y-4" id="ai-script-candidates-card">
+                      <div className="flex justify-between items-center pb-2 border-b border-blue-100/60">
+                        <div>
+                          <span className="text-[10px] font-black text-blue-700 block uppercase tracking-wider">Gemma Script Candidates</span>
+                          <span className="text-[9px] text-slate-400 block mt-0.5">Awaiting operator preview, comparison, and manual acceptance.</span>
+                        </div>
+                        <span className="text-[9px] text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-bold uppercase tracking-wider">
+                          Language: {(job.language || "en").toUpperCase()}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div className="flex flex-col space-y-1">
+                          <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Candidate A (Direct)</span>
+                          <textarea
+                            value={scriptCandidates.scriptA}
+                            readOnly
+                            rows={4.5}
+                            className="w-full p-2.5 bg-slate-50 text-slate-800 text-xs rounded-lg border border-slate-200 font-medium cursor-default resize-none"
+                          />
+                        </div>
+                        <div className="flex flex-col space-y-1">
+                          <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Candidate B (Hook First)</span>
+                          <textarea
+                            value={scriptCandidates.scriptB}
+                            readOnly
+                            rows={4.5}
+                            className="w-full p-2.5 bg-slate-50 text-slate-800 text-xs rounded-lg border border-slate-200 font-medium cursor-default resize-none"
+                          />
+                        </div>
+                        <div className="flex flex-col space-y-1">
+                          <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Candidate C (Punchy)</span>
+                          <textarea
+                            value={scriptCandidates.scriptC}
+                            readOnly
+                            rows={4.5}
+                            className="w-full p-2.5 bg-slate-50 text-slate-800 text-xs rounded-lg border border-slate-200 font-medium cursor-default resize-none"
+                          />
+                        </div>
+                      </div>
+
+                      {scriptCandidates.provenance && (
+                        <div className="text-[9px] text-slate-400 font-mono flex flex-wrap gap-x-4 gap-y-1 py-1 bg-slate-50 px-3 rounded-lg border border-slate-200/50">
+                          <span>Model: {scriptCandidates.provenance.live_model_used}</span>
+                          <span>Latency: {scriptCandidates.provenance.latency_ms} ms</span>
+                          <span>Prompt Tokens: {scriptCandidates.provenance.input_tokens || "N/A"}</span>
+                          <span>Completion Tokens: {scriptCandidates.provenance.output_tokens || "N/A"}</span>
+                        </div>
+                      )}
+
+                      <div className="flex justify-end">
+                        <button
+                          onClick={handleAcceptAiScripts}
+                          className="inline-flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black px-4 py-2 rounded-lg text-[10px] uppercase tracking-widest transition cursor-pointer"
+                          id="btn-accept-ai-scripts"
+                        >
+                          <Check className="h-3.5 w-3.5 shrink-0" />
+                          <span>Accept AI Scripts</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   

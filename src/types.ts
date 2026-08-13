@@ -55,6 +55,18 @@ export interface QuoteJob {
   cumulativeOutputTokens: number;
   cumulativeTotalTokens: number;
   estimatedCost?: number | null;
+  // Build 6 Stage 4 Observability & Accounting Patch
+  scriptProcessRunCount: number;
+  lastScriptProcessAt?: string | null;
+  lastScriptInputTokens?: number | null;
+  lastScriptOutputTokens?: number | null;
+  lastScriptTotalTokens?: number | null;
+  lastScriptLatencyMs?: number | null;
+  cumulativeScriptInputTokens: number;
+  cumulativeScriptOutputTokens: number;
+  cumulativeScriptTotalTokens: number;
+  scriptEstimatedCost?: number | null;
+  language?: string;
 }
 
 // Clean service boundaries to be connected incrementally in later builds
@@ -67,7 +79,17 @@ export interface IMeaningService {
 }
 
 export interface IScriptService {
-  generateScripts(coreMeaning: string): Promise<ScriptVariants>;
+  generateScripts(
+    cleanText: string,
+    coreMeaning: string,
+    language: string,
+    options?: {
+      scriptProcessRunCount: number;
+      cumulativeScriptInputTokens: number;
+      cumulativeScriptOutputTokens: number;
+      cumulativeScriptTotalTokens: number;
+    }
+  ): Promise<any>;
 }
 
 export interface IVoiceService {

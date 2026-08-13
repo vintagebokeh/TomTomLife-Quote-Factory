@@ -255,6 +255,202 @@ Do NOT include any markdown code fences, preambles, explanation prose, or analys
     }
   });
 
+  // Script Generation endpoint using Gemma 4 26B with structured JSON output and strict validation
+  app.post("/api/generate-scripts", async (req, res) => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.status(503).json({
+          error: "NOT_CONFIGURED",
+          message: "GEMINI_API_KEY is not configured in environment variables."
+        });
+      }
+
+      const { cleanText, coreMeaning, language } = req.body;
+      if (!cleanText || typeof cleanText !== "string" || cleanText.trim() === "" ||
+          !coreMeaning || typeof coreMeaning !== "string" || coreMeaning.trim() === "") {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: "Missing or empty cleanText or coreMeaning in request body."
+        });
+      }
+
+      const startTime = Date.now();
+      const ai = new GoogleGenAI({ apiKey });
+
+      const targetLang = (language || "en").trim().toLowerCase();
+
+      const prompt = `You are an elite short-form video scriptwriter. Your job is to convert the following text and core meaning into exactly 3 Short-form Script Variants:
+Source Text: "${cleanText}"
+Core Meaning: "${coreMeaning}"
+Source Language: "${targetLang}"
+
+You must write the scripts in the specified Source Language. If the Source Language is 'th' (Thai), the generated scripts MUST be in Thai. Do NOT translate Thai into English.
+
+Generate EXACTLY three script variants with these visual formatting and delivery requirements:
+1. SCRIPT A (DIRECT):
+- Purpose: Stay closest to the accepted clean_text/core_meaning. Natural spoken short-form delivery.
+- Format: A short, elegant monologue.
+
+2. SCRIPT B (HOOK_FIRST):
+- Purpose: Begin with a strong attention hook, then deliver the same accepted core meaning naturally.
+- Format: Starts with a high-impact question or statement to stop the scroll.
+
+3. SCRIPT C (PUNCHY):
+- Purpose: Shorter, sharper, and highly memorable. Suitable for ultra-fast-paced short-form vertical content.
+- Format: Extremely brief, concise, and punchy.
+
+All three variants MUST:
+- Preserve the accepted core meaning.
+- Not invent factual claims, attribution, or unsupported facts.
+- Not include any meta-commentary, bracketed cues, sound effects, or descriptions (like [Sound effect] or [Music plays]). ONLY output the actual words to be spoken.
+- Be written natively in the target language (if language is "th", write Thai scripts natively. Do NOT translate).
+
+You MUST return a JSON object matching this schema EXACTLY:
+{
+  "script_a": {
+    "type": "DIRECT",
+    "text": "Script A text goes here"
+  },
+  "script_b": {
+    "type": "HOOK_FIRST",
+    "text": "Script B text goes here"
+  },
+  "script_c": {
+    "type": "PUNCHY",
+    "text": "Script C text goes here"
+  }
+}
+
+Do NOT include any markdown code fences (like \`\`\`json), preambles, explanation prose, or analysis. Return ONLY the raw JSON.`;
+
+      // Track run counts for script generation
+      const nextRunCount = (req.body.scriptProcessRunCount || 0) + 1;
+      let textResponse = "";
+      let usageMetadata: any = null;
+
+      try {
+        try {
+          const aiRes = await ai.models.generateContent({
+            model: "gemma-4-26b-a4b-it",
+            contents: prompt,
+            config: {
+              responseMimeType: "application/json",
+              temperature: 0.3
+            }
+          });
+          textResponse = aiRes.text || "";
+          usageMetadata = aiRes.usageMetadata;
+        } catch (firstErr: any) {
+          console.warn("[Gemma Script Structured Call Warning] Retrying without strict json mime-type...", firstErr);
+          const aiResFallback = await ai.models.generateContent({
+            model: "gemma-4-26b-a4b-it",
+            contents: prompt,
+            config: {
+              temperature: 0.3
+            }
+          });
+          textResponse = aiResFallback.text || "";
+          usageMetadata = aiResFallback.usageMetadata;
+        }
+      } catch (invocationError: any) {
+        console.error("[Gemma Script Invocation Error]", invocationError);
+        return res.status(502).json({
+          error: "PROVIDER_FAILURE",
+          message: invocationError.message || "The standard Gemma model invocation for script generation failed.",
+          status: 502,
+          scriptProcessRunCount: nextRunCount
+        });
+      }
+
+      let cleanedText = textResponse.trim();
+      if (cleanedText.startsWith("```")) {
+        cleanedText = cleanedText.replace(/^```(json)?\s*/i, "");
+        cleanedText = cleanedText.replace(/\s*```$/, "");
+      }
+      cleanedText = cleanedText.trim();
+
+      let parsed: any;
+      try {
+        parsed = JSON.parse(cleanedText);
+      } catch (parseErr: any) {
+        console.error("[JSON Script Parse Failure]", cleanedText, parseErr);
+        return res.status(422).json({
+          error: "MALFORMED_OUTPUT",
+          message: "The model did not return a parseable JSON object.",
+          rawOutput: textResponse,
+          scriptProcessRunCount: nextRunCount
+        });
+      }
+
+      const script_a = parsed.script_a || parsed.scriptA;
+      const script_b = parsed.script_b || parsed.scriptB;
+      const script_c = parsed.script_c || parsed.scriptC;
+
+      if (!script_a || typeof script_a !== "object" || typeof script_a.text !== "string" || script_a.text.trim() === "" ||
+          !script_b || typeof script_b !== "object" || typeof script_b.text !== "string" || script_b.text.trim() === "" ||
+          !script_c || typeof script_c !== "object" || typeof script_c.text !== "string" || script_c.text.trim() === "") {
+        return res.status(422).json({
+          error: "INVALID_STRUCTURE",
+          message: "Model output is missing required script variants or text is empty.",
+          parsed,
+          scriptProcessRunCount: nextRunCount
+        });
+      }
+
+      const latency_ms = Date.now() - startTime;
+      const input_tokens = usageMetadata?.promptTokenCount || null;
+      const output_tokens = usageMetadata?.candidatesTokenCount || null;
+      const total_tokens = usageMetadata?.totalTokenCount || null;
+
+      const cumulative_script_input_tokens = (req.body.cumulativeScriptInputTokens || 0) + (input_tokens || 0);
+      const cumulative_script_output_tokens = (req.body.cumulativeScriptOutputTokens || 0) + (output_tokens || 0);
+      const cumulative_script_total_tokens = (req.body.cumulativeScriptTotalTokens || 0) + (total_tokens || 0);
+
+      res.json({
+        script_a: {
+          type: "DIRECT",
+          text: script_a.text.trim()
+        },
+        script_b: {
+          type: "HOOK_FIRST",
+          text: script_b.text.trim()
+        },
+        script_c: {
+          type: "PUNCHY",
+          text: script_c.text.trim()
+        },
+        script_process_run_count: nextRunCount,
+        last_script_process_at: new Date().toISOString(),
+        last_script_input_tokens: input_tokens,
+        last_script_output_tokens: output_tokens,
+        last_script_total_tokens: total_tokens,
+        last_script_latency_ms: latency_ms,
+        cumulative_script_input_tokens,
+        cumulative_script_output_tokens,
+        cumulative_script_total_tokens,
+        script_estimated_cost: null,
+        provenance: {
+          provider: "google-gemini-api",
+          model: "gemma-4-26b-a4b-it",
+          live_model_used: "gemma-4-26b-a4b-it",
+          processed_at: new Date().toISOString(),
+          latency_ms,
+          input_tokens,
+          output_tokens,
+          total_tokens
+        }
+      });
+    } catch (err: any) {
+      console.error("[Script Generation Error]", err);
+      res.status(500).json({
+        error: "Internal Server Error",
+        message: err.message || "An unexpected error occurred during script generation.",
+        status: 500
+      });
+    }
+  });
+
   // Catch JSON syntax errors from body parser before they propagate to static fallback
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (err instanceof SyntaxError && "status" in err && err.status === 400 && "body" in err) {
