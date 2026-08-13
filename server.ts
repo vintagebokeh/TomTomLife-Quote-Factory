@@ -553,15 +553,6 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
           throw new Error("PCM audio data must contain complete 16-bit samples.");
         }
 
-        // audio/L16 samples are big-endian; WAV PCM stores signed 16-bit samples little-endian.
-        if (isL16) {
-          const littleEndianBuffer = Buffer.allocUnsafe(audioBuffer.length);
-          for (let offset = 0; offset < audioBuffer.length; offset += 2) {
-            littleEndianBuffer.writeInt16LE(audioBuffer.readInt16BE(offset), offset);
-          }
-          audioBuffer = littleEndianBuffer;
-        }
-
         const wrapPcmInWav = (pcmBuffer: Buffer, sRate: number, channelCount: number): Buffer => {
           const wavHeader = Buffer.alloc(44);
           const dataLength = pcmBuffer.length;
