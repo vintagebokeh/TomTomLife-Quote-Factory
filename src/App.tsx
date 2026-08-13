@@ -1415,7 +1415,8 @@ export default function App() {
       return;
     }
 
-    const voiceId = slot === "female" ? freshJob.femaleVoice.voiceId : freshJob.maleVoice.voiceId;
+    // Keep provider IDs canonical even when a persisted legacy display ID is loaded.
+    const voiceId = slot === "female" ? "Sulafat" : "Charon";
     
     let text = "";
     if (freshJob.voiceSourceType === "SCRIPT_A") text = freshJob.scripts.scriptA;
@@ -1460,7 +1461,15 @@ export default function App() {
 
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(errorData.message || `Server returned status ${response.status}`);
+        const providerError = new Error(errorData.message || `Server returned status ${response.status}`) as Error & {
+          voiceProcessRunCount?: number;
+          cumulativeVoiceCharacters?: number;
+          lastVoiceProcessAt?: string;
+        };
+        providerError.voiceProcessRunCount = errorData.voiceProcessRunCount;
+        providerError.cumulativeVoiceCharacters = errorData.cumulativeVoiceCharacters;
+        providerError.lastVoiceProcessAt = errorData.lastVoiceProcessAt;
+        throw providerError;
       }
 
       const data = await response.json();
@@ -1471,6 +1480,7 @@ export default function App() {
         if (slot === "female") {
           nextJob.femaleVoice = {
             ...nextJob.femaleVoice,
+            voiceId,
             status: "GENERATED",
             audioUrlOrRef: data.audioUrl,
             audioUrl: data.audioUrl,
@@ -1480,6 +1490,7 @@ export default function App() {
         } else {
           nextJob.maleVoice = {
             ...nextJob.maleVoice,
+            voiceId,
             status: "GENERATED",
             audioUrlOrRef: data.audioUrl,
             audioUrl: data.audioUrl,
@@ -1526,6 +1537,15 @@ export default function App() {
         } else {
           nextJob.maleVoice = { ...nextJob.maleVoice, status: "PENDING" };
         }
+
+        if (typeof err.voiceProcessRunCount === "number") {
+          nextJob.voiceProcessRunCount = err.voiceProcessRunCount;
+          nextJob.lastVoiceProcessAt = err.lastVoiceProcessAt || nextJob.lastVoiceProcessAt;
+        }
+        if (typeof err.cumulativeVoiceCharacters === "number") {
+          nextJob.cumulativeVoiceCharacters = err.cumulativeVoiceCharacters;
+        }
+        nextJob.voiceEstimatedCost = null;
 
         if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
           saveJobToDb(nextJob);

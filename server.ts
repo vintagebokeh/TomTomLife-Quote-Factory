@@ -462,6 +462,10 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
 
   // Stage 5 Voice Generation using Gemini API
   app.post("/api/generate-voice", async (req, res) => {
+    let providerAttemptRunCount: number | undefined;
+    let providerAttemptStartedAt: string | undefined;
+    let preservedCumulativeCharacters: number | undefined;
+
     try {
       const apiKey = process.env.GEMINI_API_KEY;
       if (!apiKey) {
@@ -493,6 +497,10 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
         });
       }
 
+      // An attempt is counted only after validation, immediately before Gemini is invoked.
+      providerAttemptRunCount = (voiceProcessRunCount || 0) + 1;
+      providerAttemptStartedAt = new Date().toISOString();
+      preservedCumulativeCharacters = cumulativeVoiceCharacters || 0;
       const startTime = Date.now();
       const ai = new GoogleGenAI({ apiKey });
 
@@ -523,21 +531,40 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
         throw new Error("No inline audio data returned from the Gemini TTS provider.");
       }
 
-      const returnedMime = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.mimeType || "audio/pcm;rate=24000";
+      const returnedMime = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.mimeType || "audio/L16;codec=pcm;rate=24000";
       let audioBuffer = Buffer.from(base64Data, "base64");
-      const isPcm = returnedMime.toLowerCase().includes("pcm");
-      let sampleRate = 24000;
+      const normalizedMime = returnedMime.toLowerCase();
+      const mimeType = normalizedMime.split(";", 1)[0].trim();
+      const isL16 = mimeType === "audio/l16";
+      const isPcm = isL16 || normalizedMime.includes("codec=pcm") || mimeType === "audio/pcm";
+      const rateMatch = normalizedMime.match(/(?:^|;)\s*rate=(\d+)(?:;|$)/);
+      const channelsMatch = normalizedMime.match(/(?:^|;)\s*channels=(\d+)(?:;|$)/);
+      const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+      // Gemini's L16 TTS response is mono when channels is omitted.
+      const channels = channelsMatch ? parseInt(channelsMatch[1], 10) : 1;
 
       if (isPcm) {
-        const match = returnedMime.match(/rate=(\d+)/);
-        if (match) {
-          sampleRate = parseInt(match[1], 10);
+        if (!Number.isFinite(sampleRate) || sampleRate <= 0 || !Number.isInteger(channels) || channels <= 0) {
+          throw new Error(`Unsupported PCM MIME parameters: ${returnedMime}`);
         }
 
-        // Helper to wrap raw 16-bit PCM little-endian data into a browser-playable WAV container
-        const wrapPcmInWav = (pcmBuffer: Buffer, sRate: number): Buffer => {
+        if (audioBuffer.length % 2 !== 0) {
+          throw new Error("PCM audio data must contain complete 16-bit samples.");
+        }
+
+        // audio/L16 samples are big-endian; WAV PCM stores signed 16-bit samples little-endian.
+        if (isL16) {
+          const littleEndianBuffer = Buffer.allocUnsafe(audioBuffer.length);
+          for (let offset = 0; offset < audioBuffer.length; offset += 2) {
+            littleEndianBuffer.writeInt16LE(audioBuffer.readInt16BE(offset), offset);
+          }
+          audioBuffer = littleEndianBuffer;
+        }
+
+        const wrapPcmInWav = (pcmBuffer: Buffer, sRate: number, channelCount: number): Buffer => {
           const wavHeader = Buffer.alloc(44);
           const dataLength = pcmBuffer.length;
+          const blockAlign = channelCount * 2;
           
           wavHeader.write("RIFF", 0);
           wavHeader.writeUInt32LE(36 + dataLength, 4);
@@ -545,10 +572,10 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
           wavHeader.write("fmt ", 12);
           wavHeader.writeUInt32LE(16, 16);
           wavHeader.writeUInt16LE(1, 20); // 1 = PCM
-          wavHeader.writeUInt16LE(1, 22); // mono
+          wavHeader.writeUInt16LE(channelCount, 22);
           wavHeader.writeUInt32LE(sRate, 24);
-          wavHeader.writeUInt32LE(sRate * 2, 28); // sample rate * 2 bytes/sample * 1 channel
-          wavHeader.writeUInt16LE(2, 32); // mono 16-bit is 2 bytes
+          wavHeader.writeUInt32LE(sRate * blockAlign, 28);
+          wavHeader.writeUInt16LE(blockAlign, 32);
           wavHeader.writeUInt16LE(16, 34); // 16-bit
           wavHeader.write("data", 36);
           wavHeader.writeUInt32LE(dataLength, 40);
@@ -556,29 +583,28 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
           return Buffer.concat([wavHeader, pcmBuffer]);
         };
 
-        audioBuffer = wrapPcmInWav(audioBuffer, sampleRate);
+        audioBuffer = wrapPcmInWav(audioBuffer, sampleRate, channels);
       }
 
       // Write unique file inside process.cwd()/audio
-      const filename = `${slot}_voice_${Date.now()}.wav`;
+      const filename = `${slot}_voice_${Date.now()}_${Math.random().toString(36).slice(2, 10)}.wav`;
       const filePath = path.join(audioDir, filename);
       fs.writeFileSync(filePath, audioBuffer);
       const audioUrl = `/audio/${filename}`;
 
       // Calculate playtime duration of WAV/PCM data exactly
       const rawPcmLength = isPcm ? audioBuffer.length - 44 : audioBuffer.length;
-      const durationMs = Math.round((rawPcmLength / (sampleRate * 2)) * 1000);
+      const durationMs = Math.round((rawPcmLength / (sampleRate * channels * 2)) * 1000);
       const latencyMs = Date.now() - startTime;
-      const nextRunCount = (voiceProcessRunCount || 0) + 1;
       const characterCount = text.length;
-      const cumulativeCharacters = (cumulativeVoiceCharacters || 0) + characterCount;
+      const cumulativeCharacters = preservedCumulativeCharacters + characterCount;
 
       res.json({
         audioUrl,
         durationMs,
         latencyMs,
         characterCount,
-        voiceProcessRunCount: nextRunCount,
+        voiceProcessRunCount: providerAttemptRunCount,
         cumulativeVoiceCharacters: cumulativeCharacters,
         lastVoiceProcessAt: new Date().toISOString()
       });
@@ -587,7 +613,10 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
       res.status(500).json({
         error: "Internal Server Error",
         message: err.message || "An unexpected error occurred during voice generation.",
-        status: 500
+        status: 500,
+        voiceProcessRunCount: providerAttemptRunCount,
+        cumulativeVoiceCharacters: preservedCumulativeCharacters,
+        lastVoiceProcessAt: providerAttemptStartedAt
       });
     }
   });

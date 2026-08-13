@@ -15,7 +15,7 @@ export const initialMockJob: QuoteJob = {
     scriptC: "If you don't take risks, you've already failed. The world moves too fast for comfort zones. Make smart, calculated bets. Move fast. Take the risk or lose the chance."
   },
   femaleVoice: {
-    voiceId: "V1-F-Sienna",
+    voiceId: "Sulafat",
     name: "Sienna (Warm, Professional)",
     status: "PENDING",
     audioUrl: undefined,
@@ -24,7 +24,7 @@ export const initialMockJob: QuoteJob = {
     durationMs: null
   },
   maleVoice: {
-    voiceId: "V1-M-Marcus",
+    voiceId: "Charon",
     name: "Marcus (Deep, Cinematic)",
     status: "PENDING",
     audioUrl: undefined,
