@@ -5,6 +5,7 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import fs from "fs";
 import { execFile } from "child_process";
+import { createHash } from "crypto";
 
 interface VideoGenerationRequest {
   contentId?: unknown;
@@ -16,6 +17,8 @@ interface VideoGenerationRequest {
   maleAudioStatus?: unknown;
   femaleAudioRef?: unknown;
   maleAudioRef?: unknown;
+  narrationSlot?: unknown;
+  sourceSha256?: unknown;
   videoProcessRunCount?: unknown;
 }
 
@@ -77,8 +80,8 @@ const inspectVideoArtifact = (filePath: string): Promise<Record<string, unknown>
 
 const getManusError = (payload: any, fallback: string) => payload?.error?.message || payload?.message || fallback;
 
-const buildManusVideoPrompt = (request: Required<Pick<VideoGenerationRequest, "voiceSourceTextSnapshot" | "language">>) =>
-  `Create exactly one short vertical 9:16 video. Use this approved ${request.language} narration as the creative source: "${request.voiceSourceTextSnapshot}". Return one provider-generated primary MP4 video artifact. Do not create additional videos.`;
+const buildManusVideoPrompt = (request: Required<Pick<VideoGenerationRequest, "voiceSourceTextSnapshot" | "language" | "narrationSlot">>) =>
+  `Create exactly one final short vertical 9:16 video. The supplied visual file is the canonical visual input and the supplied ${(request.narrationSlot as string).toLowerCase()} WAV is the canonical narration track; synchronize the video to that supplied narration. Use this approved ${request.language} narration as the creative source: "${request.voiceSourceTextSnapshot}". Return exactly one provider-generated primary MP4 video artifact. Do not create additional videos or substitute a different narration.`;
 
 const collectAttachments = (messages: any[]): ManusAttachment[] => messages.flatMap((message) => [
   ...(Array.isArray(message?.assistant_message?.attachments) ? message.assistant_message.attachments : []),
@@ -95,10 +98,68 @@ const getProviderFailure = (messages: any[]): string | null => {
   return typeof failure?.error_message?.content === "string" ? failure.error_message.content : null;
 };
 
+const getQuotaFailure = (messages: any[]): string | null => {
+  const messageText = messages
+    .flatMap((message) => [message?.assistant_message?.content, message?.error_message?.content])
+    .filter((value): value is string => typeof value === "string")
+    .find((value) => /quota|credit|free plan/i.test(value));
+  return messageText || null;
+};
+
 const isOwnedArtifactRef = (reference: unknown, routePrefix: string, directory: string): boolean => {
   if (typeof reference !== "string" || !reference.startsWith(`${routePrefix}/`)) return false;
   const filename = path.basename(reference);
   return reference === `${routePrefix}/${filename}` && fs.existsSync(path.join(directory, filename));
+};
+
+const resolveOwnedArtifactPath = (reference: string, directory: string) => path.join(directory, path.basename(reference));
+
+const sha256File = (filePath: string) => createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+
+const inferMediaMimeType = (filePath: string, fallback: string): string => {
+  const extension = path.extname(filePath).toLowerCase();
+  const mimeByExtension: Record<string, string> = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".wav": "audio/wav"
+  };
+  return mimeByExtension[extension] || fallback;
+};
+
+interface ManusUploadedFile {
+  id: string;
+  filename: string;
+  bytes: number;
+  mimeType: string;
+}
+
+const uploadManusFile = async (apiKey: string, filePath: string, fallbackFilename: string, fallbackMimeType: string): Promise<ManusUploadedFile> => {
+  const filename = path.basename(fallbackFilename).replace(/[^a-zA-Z0-9._-]/g, "_") || "artifact";
+  const bytes = fs.readFileSync(filePath);
+  if (!bytes.length) throw new Stage6Error("MEDIA_UPLOAD_FAILED", "A canonical media artifact is empty.", 502);
+
+  const createResponse = await fetch(`${MANUS_API_BASE}/file.upload`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-manus-api-key": apiKey },
+    body: JSON.stringify({ filename })
+  });
+  const createPayload = await createResponse.json().catch(() => ({}));
+  const fileId = createPayload?.file?.id;
+  const uploadUrl = createPayload?.upload_url;
+  if (!createResponse.ok || createPayload?.ok === false || typeof fileId !== "string" || typeof uploadUrl !== "string") {
+    throw new Stage6Error("MEDIA_UPLOAD_FAILED", getManusError(createPayload, `Manus media upload setup failed (${createResponse.status}).`), 502);
+  }
+
+  const putResponse = await fetch(uploadUrl, { method: "PUT", body: bytes });
+  if (!putResponse.ok) throw new Stage6Error("MEDIA_UPLOAD_FAILED", `Manus media upload failed (${putResponse.status}).`, 502);
+
+  const detailResponse = await fetch(`${MANUS_API_BASE}/file.detail?${new URLSearchParams({ file_id: fileId })}`, {
+    headers: { "x-manus-api-key": apiKey }
+  });
+  const detailPayload = await detailResponse.json().catch(() => ({}));
+  if (!detailResponse.ok || detailPayload?.ok === false || detailPayload?.file?.status !== "uploaded") {
+    throw new Stage6Error("MEDIA_UPLOAD_FAILED", getManusError(detailPayload, "Manus did not confirm the uploaded media artifact."), 502);
+  }
+  return { id: fileId, filename, bytes: Number(detailPayload.file.bytes) || bytes.length, mimeType: detailPayload.file.content_type || inferMediaMimeType(filePath, fallbackMimeType) };
 };
 
 const pollManusTask = async (apiKey: string, taskId: string): Promise<ManusAttachment[]> => {
@@ -114,9 +175,14 @@ const pollManusTask = async (apiKey: string, taskId: string): Promise<ManusAttac
     const messages = Array.isArray(payload?.messages) ? payload.messages : [];
     const status = getLatestAgentStatus(messages);
     if (status === "error" || status === "failed") {
-      throw new Stage6Error("MANUS_TASK_FAILED", getProviderFailure(messages) || "Manus reported a task failure.", 502, taskId);
+      const failure = getProviderFailure(messages) || "Manus reported a task failure.";
+      throw new Stage6Error(/quota|credit|free plan/i.test(failure) ? "MANUS_QUOTA_EXHAUSTED" : "MANUS_TASK_FAILED", failure, 502, taskId);
     }
-    if (status === "stopped") return collectAttachments(messages);
+    if (status === "stopped") {
+      const quotaFailure = getQuotaFailure(messages);
+      if (quotaFailure) throw new Stage6Error("MANUS_QUOTA_EXHAUSTED", quotaFailure, 502, taskId);
+      return collectAttachments(messages);
+    }
     if (status && status !== "running") {
       throw new Stage6Error("MANUS_TASK_UNSUPPORTED_STATUS", `Manus task entered unsupported status: ${status}.`, 502, taskId);
     }
@@ -863,6 +929,8 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
     if (request.maleAudioStatus !== "GENERATED") entryErrors.push("maleAudioStatus must be GENERATED");
     if (!isOwnedArtifactRef(request.femaleAudioRef, "/audio", audioDir)) entryErrors.push("femaleAudioRef must be an existing server-owned /audio/ reference");
     if (!isOwnedArtifactRef(request.maleAudioRef, "/audio", audioDir)) entryErrors.push("maleAudioRef must be an existing server-owned /audio/ reference");
+    if (request.narrationSlot !== "FEMALE" && request.narrationSlot !== "MALE") entryErrors.push("narrationSlot must be FEMALE or MALE");
+    if (typeof request.sourceSha256 !== "string" || !/^[a-f0-9]{64}$/i.test(request.sourceSha256)) entryErrors.push("sourceSha256 must be a SHA-256 hex digest");
 
     if (entryErrors.length) {
       return res.status(400).json({ error: "INVALID_STAGE6_INPUT", message: "Stage 6 entry contract rejected.", details: entryErrors });
@@ -877,19 +945,51 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
       });
     }
 
+    const visualPath = resolveOwnedArtifactPath(request.visualRef as string, sourceDir);
+    if (sha256File(visualPath).toLowerCase() !== (request.sourceSha256 as string).toLowerCase()) {
+      return res.status(400).json({ error: "VISUAL_ARTIFACT_MISSING", message: "The durable visual artifact no longer matches the canonical source identity." });
+    }
+
+    const narrationRef = request.narrationSlot === "FEMALE" ? request.femaleAudioRef as string : request.maleAudioRef as string;
+    const narrationPath = resolveOwnedArtifactPath(narrationRef, audioDir);
+    if (!fs.existsSync(narrationPath)) {
+      return res.status(400).json({ error: "AUDIO_ARTIFACT_MISSING", message: "The selected canonical narration artifact is missing." });
+    }
+    const visualMimeType = inferMediaMimeType(visualPath, "application/octet-stream");
+    const narrationMimeType = inferMediaMimeType(narrationPath, "application/octet-stream");
+    if (!visualMimeType.startsWith("image/") && !visualMimeType.startsWith("video/")) {
+      return res.status(400).json({ error: "PROVIDER_MEDIA_TRANSPORT_UNSUPPORTED", message: "The durable visual artifact has an unsupported media type." });
+    }
+    if (narrationMimeType !== "audio/wav") {
+      return res.status(400).json({ error: "PROVIDER_MEDIA_TRANSPORT_UNSUPPORTED", message: "The selected narration artifact must be a WAV file." });
+    }
+
     const startedAt = new Date().toISOString();
     const startedAtMs = Date.now();
-    const videoProcessRunCount = (typeof request.videoProcessRunCount === "number" ? request.videoProcessRunCount : 0) + 1;
+    const previousVideoProcessRunCount = typeof request.videoProcessRunCount === "number" ? request.videoProcessRunCount : 0;
+    let providerAttemptStarted = false;
     let taskId: string | null = null;
     let outputPath: string | null = null;
 
     try {
-      const prompt = buildManusVideoPrompt({ voiceSourceTextSnapshot: request.voiceSourceTextSnapshot as string, language: request.language as string });
+      const visualUpload = await uploadManusFile(apiKey, visualPath, path.basename(visualPath), visualMimeType);
+      const narrationUpload = await uploadManusFile(apiKey, narrationPath, path.basename(narrationPath), narrationMimeType);
+      const prompt = buildManusVideoPrompt({
+        voiceSourceTextSnapshot: request.voiceSourceTextSnapshot as string,
+        language: request.language as string,
+        narrationSlot: request.narrationSlot as "FEMALE" | "MALE"
+      });
+      console.info("[stage6-manus-media]", {
+        contentId: request.contentId,
+        visual: { transport: "file_id", mimeType: visualUpload.mimeType, bytes: visualUpload.bytes },
+        narration: { slot: request.narrationSlot, transport: "file_id", mimeType: narrationUpload.mimeType, bytes: narrationUpload.bytes }
+      });
+      providerAttemptStarted = true;
       const createResponse = await fetch(`${MANUS_API_BASE}/task.create`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-manus-api-key": apiKey },
         body: JSON.stringify({
-          message: { content: [{ type: "text", text: prompt }] },
+          message: { content: [{ type: "text", text: prompt }, { type: "file", file_id: visualUpload.id }, { type: "file", file_id: narrationUpload.id }] },
           agent_profile: MANUS_AGENT_PROFILE,
           interactive_mode: false,
           share_visibility: "private",
@@ -898,7 +998,8 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
       });
       const createPayload = await createResponse.json().catch(() => ({}));
       if (!createResponse.ok || createPayload?.ok === false || typeof createPayload?.task_id !== "string") {
-        throw new Stage6Error("MANUS_TASK_CREATE_FAILED", getManusError(createPayload, `Manus task creation failed (${createResponse.status}).`));
+        const message = getManusError(createPayload, `Manus task creation failed (${createResponse.status}).`);
+        throw new Stage6Error(/quota|credit|free plan/i.test(message) ? "MANUS_QUOTA_EXHAUSTED" : "MANUS_TASK_CREATE_FAILED", message);
       }
       taskId = createPayload.task_id;
 
@@ -907,16 +1008,21 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
       if (!primaryVideo) throw new Stage6Error("MANUS_VIDEO_ATTACHMENT_MISSING", "Manus completed the task without a supported video attachment.", 502, taskId);
 
       const downloadResponse = await fetch(primaryVideo.url!);
-      if (!downloadResponse.ok) throw new Stage6Error("MANUS_VIDEO_DOWNLOAD_FAILED", `Unable to download the selected Manus video artifact (${downloadResponse.status}).`, 502, taskId);
+      if (!downloadResponse.ok) throw new Stage6Error("PROVIDER_ARTIFACT_DOWNLOAD_FAILED", `Unable to download the selected Manus video artifact (${downloadResponse.status}).`, 502, taskId);
       const downloadedBytes = Buffer.from(await downloadResponse.arrayBuffer());
-      if (!downloadedBytes.length) throw new Stage6Error("MANUS_VIDEO_DOWNLOAD_FAILED", "Selected Manus video artifact was empty.", 502, taskId);
+      if (!downloadedBytes.length) throw new Stage6Error("PROVIDER_ARTIFACT_DOWNLOAD_FAILED", "Selected Manus video artifact was empty.", 502, taskId);
 
       const safeProviderFilename = path.basename(primaryVideo.filename || "manus-video.mp4").replace(/[^a-zA-Z0-9._-]/g, "_");
       const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}_${safeProviderFilename}`;
       outputPath = path.join(videoDir, filename);
       fs.writeFileSync(outputPath, downloadedBytes);
 
-      const metadata = await validateDownloadedVideo(outputPath, primaryVideo.content_type!);
+      let metadata;
+      try {
+        metadata = await validateDownloadedVideo(outputPath, primaryVideo.content_type!);
+      } catch (error: any) {
+        throw new Stage6Error("VIDEO_VALIDATION_FAILED", error?.message || "Downloaded Manus video failed local validation.", 502, taskId);
+      }
       const processedAt = new Date().toISOString();
       const result: VideoGenerationResult = {
         status: "READY",
@@ -929,7 +1035,7 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
         processedAt,
         ...metadata
       };
-      return res.json({ result, videoProcessRunCount, videoStartedAt: startedAt });
+      return res.json({ result, videoProcessRunCount: previousVideoProcessRunCount + (providerAttemptStarted ? 1 : 0), videoStartedAt: startedAt });
     } catch (error: any) {
       if (outputPath && fs.existsSync(outputPath)) {
         try { fs.unlinkSync(outputPath); } catch { /* preserve the structured provider failure response */ }
@@ -946,7 +1052,7 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
         failureCode: failure.code,
         failureMessage: failure.message
       };
-      return res.status(failure.statusCode).json({ error: failure.code, message: failure.message, result, videoProcessRunCount, videoStartedAt: startedAt });
+      return res.status(failure.statusCode).json({ error: failure.code, message: failure.message, result, videoProcessRunCount: previousVideoProcessRunCount + (providerAttemptStarted ? 1 : 0), videoStartedAt: startedAt });
     }
   });
 

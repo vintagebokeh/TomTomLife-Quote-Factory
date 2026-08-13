@@ -395,8 +395,22 @@ export default function App() {
     if (candidate.femaleVoice.status !== "GENERATED" || !candidate.femaleVoice.audioUrlOrRef) return "Stage 6 requires a generated Female audio artifact.";
     if (candidate.maleVoice.status !== "GENERATED" || !candidate.maleVoice.audioUrlOrRef) return "Stage 6 requires a generated Male audio artifact.";
     if (!candidate.stage6VisualRef) return "Stage 6 requires a server-owned visual source artifact.";
+    if (!candidate.sourceSha256) return "Stage 6 requires a verified source identity.";
     if (!candidate.voiceSourceTextSnapshot) return "Stage 6 requires the selected voice source text snapshot.";
     return null;
+  };
+
+  const handleVideoNarrationSlotChange = async (narrationSlot: "FEMALE" | "MALE") => {
+    const sourceJob = jobRef.current;
+    if (sourceJob.videoStatus === "RENDERING" || sourceJob.videoNarrationSlot === narrationSlot) return;
+    const invalidated = invalidateVideo({
+      ...sourceJob,
+      status: sourceJob.status === "VIDEO_READY" ? "AUDIO_READY" : sourceJob.status,
+      videoNarrationSlot: narrationSlot
+    });
+    setJob(invalidated);
+    await saveJobToDb(invalidated);
+    notify(`Stage 6 narration set to ${narrationSlot}. Any prior video artifact was cleared.`, "info");
   };
 
   const handleGenerateVideoDirectly = async () => {
@@ -417,6 +431,8 @@ export default function App() {
       maleAudioStatus: "GENERATED",
       femaleAudioRef: sourceJob.femaleVoice.audioUrlOrRef!,
       maleAudioRef: sourceJob.maleVoice.audioUrlOrRef!,
+      narrationSlot: sourceJob.videoNarrationSlot || "FEMALE",
+      sourceSha256: sourceJob.sourceSha256!,
       videoProcessRunCount: sourceJob.videoProcessRunCount || 0
     };
 
@@ -442,7 +458,7 @@ export default function App() {
       const data = await response.json().catch(() => ({}));
       const result = data.result as VideoGenerationResult | undefined;
       const currentJob = jobRef.current;
-      const inputChanged = currentJob.stage6VisualRef !== request.visualRef || currentJob.voiceSourceTextSnapshot !== request.voiceSourceTextSnapshot || currentJob.femaleVoice.audioUrlOrRef !== request.femaleAudioRef || currentJob.maleVoice.audioUrlOrRef !== request.maleAudioRef;
+      const inputChanged = currentJob.stage6VisualRef !== request.visualRef || currentJob.sourceSha256 !== request.sourceSha256 || currentJob.voiceSourceTextSnapshot !== request.voiceSourceTextSnapshot || currentJob.femaleVoice.audioUrlOrRef !== request.femaleAudioRef || currentJob.maleVoice.audioUrlOrRef !== request.maleAudioRef || currentJob.videoNarrationSlot !== request.narrationSlot;
       if (inputChanged) {
         notify("Stage 6 result was ignored because canonical inputs changed during rendering.", "info");
         return;
@@ -3381,6 +3397,29 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                             </>
                           )}
                         </div>
+                      </div>
+
+                      <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl">
+                        <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest block mb-2">Stage 6 Canonical Narration</span>
+                        <div className="grid grid-cols-2 gap-2">
+                          {(["FEMALE", "MALE"] as const).map((slot) => {
+                            const voice = slot === "FEMALE" ? job.femaleVoice : job.maleVoice;
+                            const selected = (job.videoNarrationSlot || "FEMALE") === slot;
+                            return (
+                              <button
+                                key={slot}
+                                type="button"
+                                disabled={job.videoStatus === "RENDERING" || voice.status !== "GENERATED" || !voice.audioUrlOrRef}
+                                onClick={() => void handleVideoNarrationSlotChange(slot)}
+                                className={`rounded-lg border px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${selected ? "border-blue-500 bg-blue-50 text-blue-900" : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"}`}
+                              >
+                                <span className="block text-[10px] font-black uppercase tracking-wider">{slot}</span>
+                                <span className="block text-[10px] font-medium truncate">{voice.name} · {voice.duration || "duration unavailable"}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <p className="mt-2 text-[10px] text-slate-500">Only the selected generated WAV is uploaded to Manus. Changing it clears only the Stage 6 video artifact.</p>
                       </div>
                     </div>
 

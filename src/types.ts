@@ -39,6 +39,8 @@ export interface QuoteJob {
   sourceSha256?: string | null;
   // Server-owned visual reference required by Stage 6; browser blob URLs are preview-only.
   stage6VisualRef?: string | null;
+  // V1 Stage 6 uses one canonical narration track per rendered video.
+  videoNarrationSlot?: "FEMALE" | "MALE" | null;
   rawOcr: string;
   cleanText: string;
   coreMeaning: string;
@@ -138,6 +140,8 @@ export interface VideoGenerationRequest {
   maleAudioStatus: "GENERATED";
   femaleAudioRef: string;
   maleAudioRef: string;
+  narrationSlot: "FEMALE" | "MALE";
+  sourceSha256: string;
   videoProcessRunCount: number;
 }
 

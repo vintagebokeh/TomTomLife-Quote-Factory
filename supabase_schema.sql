@@ -45,6 +45,7 @@ WITH CHECK (true);
 -- also apply cleanly to databases provisioned by earlier Build 7 handoffs.
 ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS stage6_visual_ref TEXT;
 ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS source_sha256 TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_narration_slot VARCHAR(10) NOT NULL DEFAULT 'FEMALE';
 ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_status VARCHAR(20) NOT NULL DEFAULT 'PENDING';
 ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_url_or_ref TEXT;
 ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_provider TEXT;

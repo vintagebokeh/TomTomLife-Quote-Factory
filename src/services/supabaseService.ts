@@ -69,6 +69,7 @@ export interface QuoteJobRow {
   voice_estimated_cost?: number | null;
   // Build 8 Stage 6 Video Foundation Columns
   stage6_visual_ref?: string | null;
+  video_narration_slot?: "FEMALE" | "MALE" | null;
   video_status?: string | null;
   video_url_or_ref?: string | null;
   video_provider?: string | null;
@@ -126,6 +127,7 @@ export function mapRowToJob(row: QuoteJobRow): QuoteJob {
       durationMs: row.male_duration_ms || null
     },
     videoStatus: (row.video_status as QuoteJob["videoStatus"]) || "PENDING",
+    videoNarrationSlot: row.video_narration_slot || "FEMALE",
     videoUrlOrRef: row.video_url_or_ref || null,
     videoProvider: row.video_provider || null,
     videoEngine: row.video_engine || null,
@@ -240,6 +242,7 @@ export function mapJobToRow(job: QuoteJob): QuoteJobRow {
     voice_estimated_cost: job.voiceEstimatedCost || null,
     // Build 8 Stage 6 Video Foundation Mappings
     stage6_visual_ref: job.stage6VisualRef || null,
+    video_narration_slot: job.videoNarrationSlot || "FEMALE",
     video_status: job.videoStatus,
     video_url_or_ref: job.videoUrlOrRef || null,
     video_provider: job.videoProvider || null,
