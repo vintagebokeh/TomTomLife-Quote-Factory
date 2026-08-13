@@ -64,6 +64,7 @@ const MANUS_API_BASE = "https://api.manus.ai/v2";
 const MANUS_AGENT_PROFILE = "manus-1.6-lite";
 const MANUS_POLL_INTERVAL_MS = 3000;
 const MANUS_POLL_TIMEOUT_MS = 5 * 60 * 1000;
+const MANUS_TASK_VISIBILITY_RETRY_DELAYS_MS = [1000, 2000, 3000] as const;
 
 const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -172,6 +173,8 @@ const uploadManusFile = async (apiKey: string, filePath: string, fallbackFilenam
 const pollManusTask = async (apiKey: string, taskId: string, stage6AttemptId: string, taskCreatedAtMs: number): Promise<ManusAttachment[]> => {
   const deadline = Date.now() + MANUS_POLL_TIMEOUT_MS;
   let isFirstPoll = true;
+  let visibilityRetryCount = 0;
+  let taskVisibilityEstablished = false;
   while (Date.now() < deadline) {
     const query = new URLSearchParams({ task_id: taskId, order: "desc", limit: "100" });
     if (isFirstPoll) {
@@ -205,11 +208,42 @@ const pollManusTask = async (apiKey: string, taskId: string, stage6AttemptId: st
       });
       isFirstPoll = false;
     }
+    const isTransientTaskVisibilityNotFound = !taskVisibilityEstablished && response.status === 404 && payload?.error?.code === "not_found";
+    if (isTransientTaskVisibilityNotFound) {
+      const waitMs = MANUS_TASK_VISIBILITY_RETRY_DELAYS_MS[visibilityRetryCount];
+      if (waitMs !== undefined) {
+        visibilityRetryCount += 1;
+        console.info("[MANUS_LIFECYCLE_DIAGNOSTIC]", {
+          event: "task_visibility_retry",
+          stage6AttemptId,
+          taskId,
+          retryNumber: visibilityRetryCount,
+          previousHttpStatus: response.status,
+          providerErrorCode: payload.error.code,
+          waitMs,
+          elapsedMsSinceTaskCreate: Date.now() - taskCreatedAtMs
+        });
+        await sleep(waitMs);
+        continue;
+      }
+      throw new Stage6Error("MANUS_TASK_VISIBILITY_TIMEOUT", "Task remained unavailable after task.create visibility retries.", 502, taskId);
+    }
     if (!response.ok || payload?.ok === false) {
       throw new Stage6Error("MANUS_POLL_FAILED", getManusError(payload, `Manus polling failed (${response.status}).`), 502, taskId);
     }
 
     const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+    if (!taskVisibilityEstablished) {
+      taskVisibilityEstablished = true;
+      console.info("[MANUS_LIFECYCLE_DIAGNOSTIC]", {
+        event: "task_visibility_established",
+        stage6AttemptId,
+        taskId,
+        retryCountRequired: visibilityRetryCount,
+        elapsedMsSinceTaskCreate: Date.now() - taskCreatedAtMs,
+        messageCount: messages.length
+      });
+    }
     const status = getLatestAgentStatus(messages);
     if (status === "error" || status === "failed") {
       const failure = getProviderFailure(messages) || "Manus reported a task failure.";
