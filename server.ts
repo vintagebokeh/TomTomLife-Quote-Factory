@@ -5,7 +5,7 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import fs from "fs";
 import { execFile } from "child_process";
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 
 interface VideoGenerationRequest {
   contentId?: unknown;
@@ -130,6 +130,7 @@ interface ManusUploadedFile {
   filename: string;
   bytes: number;
   mimeType: string;
+  status: string | null;
 }
 
 const uploadManusFile = async (apiKey: string, filePath: string, fallbackFilename: string, fallbackMimeType: string): Promise<ManusUploadedFile> => {
@@ -159,15 +160,51 @@ const uploadManusFile = async (apiKey: string, filePath: string, fallbackFilenam
   if (!detailResponse.ok || detailPayload?.ok === false || detailPayload?.file?.status !== "uploaded") {
     throw new Stage6Error("MEDIA_UPLOAD_FAILED", getManusError(detailPayload, "Manus did not confirm the uploaded media artifact."), 502);
   }
-  return { id: fileId, filename, bytes: Number(detailPayload.file.bytes) || bytes.length, mimeType: detailPayload.file.content_type || inferMediaMimeType(filePath, fallbackMimeType) };
+  return {
+    id: fileId,
+    filename,
+    bytes: Number(detailPayload.file.bytes) || bytes.length,
+    mimeType: detailPayload.file.content_type || inferMediaMimeType(filePath, fallbackMimeType),
+    status: typeof detailPayload.file.status === "string" ? detailPayload.file.status : null
+  };
 };
 
-const pollManusTask = async (apiKey: string, taskId: string): Promise<ManusAttachment[]> => {
+const pollManusTask = async (apiKey: string, taskId: string, stage6AttemptId: string, taskCreatedAtMs: number): Promise<ManusAttachment[]> => {
   const deadline = Date.now() + MANUS_POLL_TIMEOUT_MS;
+  let isFirstPoll = true;
   while (Date.now() < deadline) {
     const query = new URLSearchParams({ task_id: taskId, order: "desc", limit: "100" });
+    if (isFirstPoll) {
+      console.info("[MANUS_LIFECYCLE_DIAGNOSTIC]", {
+        event: "first_poll_request",
+        stage6AttemptId,
+        taskId,
+        endpoint: "task.listMessages",
+        order: "desc",
+        limit: 100,
+        timestamp: new Date().toISOString(),
+        elapsedMsSinceTaskCreate: Date.now() - taskCreatedAtMs
+      });
+    }
     const response = await fetch(`${MANUS_API_BASE}/task.listMessages?${query}`, { headers: { "x-manus-api-key": apiKey } });
     const payload = await response.json().catch(() => ({}));
+    if (isFirstPoll) {
+      const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+      console.info("[MANUS_LIFECYCLE_DIAGNOSTIC]", {
+        event: "first_poll_result",
+        stage6AttemptId,
+        taskId,
+        httpStatus: response.status,
+        responseOk: typeof payload?.ok === "boolean" ? payload.ok : null,
+        providerRequestId: typeof payload?.request_id === "string" ? payload.request_id : null,
+        providerErrorCode: typeof payload?.error?.code === "string" ? payload.error.code : null,
+        providerErrorMessage: typeof payload?.error?.message === "string" ? payload.error.message : null,
+        messageCount: response.ok && payload?.ok !== false ? messages.length : null,
+        timestamp: new Date().toISOString(),
+        elapsedMsSinceTaskCreate: Date.now() - taskCreatedAtMs
+      });
+      isFirstPoll = false;
+    }
     if (!response.ok || payload?.ok === false) {
       throw new Stage6Error("MANUS_POLL_FAILED", getManusError(payload, `Manus polling failed (${response.status}).`), 502, taskId);
     }
@@ -967,13 +1004,32 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
     const startedAt = new Date().toISOString();
     const startedAtMs = Date.now();
     const previousVideoProcessRunCount = typeof request.videoProcessRunCount === "number" ? request.videoProcessRunCount : 0;
+    const stage6AttemptId = `stage6-${Date.now()}-${randomUUID().slice(0, 8)}`;
     let providerAttemptStarted = false;
     let taskId: string | null = null;
     let outputPath: string | null = null;
 
     try {
       const visualUpload = await uploadManusFile(apiKey, visualPath, path.basename(visualPath), visualMimeType);
+      console.info("[MANUS_LIFECYCLE_DIAGNOSTIC]", {
+        event: "upload_confirmed",
+        stage6AttemptId,
+        mediaRole: "visual",
+        fileIdPresent: !!visualUpload.id,
+        providerMimeType: visualUpload.mimeType,
+        byteCount: visualUpload.bytes,
+        uploadStatus: visualUpload.status
+      });
       const narrationUpload = await uploadManusFile(apiKey, narrationPath, path.basename(narrationPath), narrationMimeType);
+      console.info("[MANUS_LIFECYCLE_DIAGNOSTIC]", {
+        event: "upload_confirmed",
+        stage6AttemptId,
+        mediaRole: "narration",
+        fileIdPresent: !!narrationUpload.id,
+        providerMimeType: narrationUpload.mimeType,
+        byteCount: narrationUpload.bytes,
+        uploadStatus: narrationUpload.status
+      });
       const prompt = buildManusVideoPrompt({
         voiceSourceTextSnapshot: request.voiceSourceTextSnapshot as string,
         language: request.language as string,
@@ -997,13 +1053,27 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
         })
       });
       const createPayload = await createResponse.json().catch(() => ({}));
+      const capturedTaskId = typeof createPayload?.task_id === "string" ? createPayload.task_id : null;
+      const taskCreateResultAtMs = Date.now();
+      console.info("[MANUS_LIFECYCLE_DIAGNOSTIC]", {
+        event: "task_create_result",
+        stage6AttemptId,
+        httpStatus: createResponse.status,
+        responseOk: typeof createPayload?.ok === "boolean" ? createPayload.ok : null,
+        providerRequestId: typeof createPayload?.request_id === "string" ? createPayload.request_id : null,
+        taskId: capturedTaskId,
+        taskIdLength: capturedTaskId?.length ?? 0,
+        attachmentCount: 2,
+        engine: MANUS_AGENT_PROFILE,
+        timestamp: new Date().toISOString()
+      });
       if (!createResponse.ok || createPayload?.ok === false || typeof createPayload?.task_id !== "string") {
         const message = getManusError(createPayload, `Manus task creation failed (${createResponse.status}).`);
         throw new Stage6Error(/quota|credit|free plan/i.test(message) ? "MANUS_QUOTA_EXHAUSTED" : "MANUS_TASK_CREATE_FAILED", message);
       }
       taskId = createPayload.task_id;
 
-      const attachments = await pollManusTask(apiKey, taskId);
+      const attachments = await pollManusTask(apiKey, taskId, stage6AttemptId, taskCreateResultAtMs);
       const primaryVideo = attachments.find((attachment) => typeof attachment.content_type === "string" && attachment.content_type.toLowerCase().startsWith("video/") && typeof attachment.url === "string");
       if (!primaryVideo) throw new Stage6Error("MANUS_VIDEO_ATTACHMENT_MISSING", "Manus completed the task without a supported video attachment.", 502, taskId);
 
