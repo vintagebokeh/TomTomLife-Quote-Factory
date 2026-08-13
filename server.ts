@@ -466,6 +466,7 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
     let providerAttemptRunCount: number | undefined;
     let providerAttemptStartedAt: string | undefined;
     let preservedCumulativeCharacters: number | undefined;
+    let audioDiagnostic: Record<string, unknown> | undefined;
 
     try {
       const apiKey = process.env.GEMINI_API_KEY;
@@ -527,12 +528,15 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
         }
       });
 
-      const base64Data = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      const inlineData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+      const base64Data = inlineData?.data;
       if (!base64Data) {
         throw new Error("No inline audio data returned from the Gemini TTS provider.");
       }
 
-      const returnedMime = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.mimeType || "audio/L16;codec=pcm;rate=24000";
+      const providerMimeType = inlineData?.mimeType || null;
+      const adapterFallbackMimeType = "audio/L16;codec=pcm;rate=24000";
+      const returnedMime = providerMimeType || adapterFallbackMimeType;
       let audioBuffer = Buffer.from(base64Data, "base64");
       const normalizedMime = returnedMime.toLowerCase();
       const mimeType = normalizedMime.split(";", 1)[0].trim();
@@ -540,9 +544,39 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
       const isPcm = isL16 || normalizedMime.includes("codec=pcm") || mimeType === "audio/pcm";
       const rateMatch = normalizedMime.match(/(?:^|;)\s*rate=(\d+)(?:;|$)/);
       const channelsMatch = normalizedMime.match(/(?:^|;)\s*channels=(\d+)(?:;|$)/);
+      const codecMatch = normalizedMime.match(/(?:^|;)\s*codec=([^;\s]+)(?:;|$)/);
       const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
       // Gemini's L16 TTS response is mono when channels is omitted.
       const channels = channelsMatch ? parseInt(channelsMatch[1], 10) : 1;
+      const isWavContainer = audioBuffer.length >= 12 && audioBuffer.subarray(0, 4).equals(Buffer.from("RIFF")) && audioBuffer.subarray(8, 12).equals(Buffer.from("WAVE"));
+      const detectedFormat = isWavContainer ? "wav" : isPcm ? "raw-pcm" : "unknown";
+
+      audioDiagnostic = {
+        model: "gemini-2.5-flash-preview-tts",
+        slot,
+        voiceId,
+        providerMimeType,
+        adapterFallbackMimeType,
+        parsedRate: rateMatch ? sampleRate : null,
+        parsedChannels: channelsMatch ? channels : null,
+        parsedCodec: codecMatch ? codecMatch[1] : null,
+        effectiveRate: sampleRate,
+        effectiveChannels: channels,
+        detectedFormat,
+        decodedByteLength: audioBuffer.length
+      };
+
+      if (detectedFormat !== "raw-pcm") {
+        throw Object.assign(new Error("Unsupported Gemini audio representation returned by provider."), {
+          statusCode: 422,
+          errorCode: "UNSUPPORTED_PROVIDER_AUDIO",
+          providerMimeType,
+          detectedFormat,
+          audioDiagnostic
+        });
+      }
+
+      let finalWavPayloadByteLength: number | null = null;
 
       if (isPcm) {
         if (!Number.isFinite(sampleRate) || sampleRate <= 0 || !Number.isInteger(channels) || channels <= 0) {
@@ -552,6 +586,8 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
         if (audioBuffer.length % 2 !== 0) {
           throw new Error("PCM audio data must contain complete 16-bit samples.");
         }
+
+        finalWavPayloadByteLength = audioBuffer.length;
 
         const wrapPcmInWav = (pcmBuffer: Buffer, sRate: number, channelCount: number): Buffer => {
           const wavHeader = Buffer.alloc(44);
@@ -591,6 +627,13 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
       const characterCount = text.length;
       const cumulativeCharacters = preservedCumulativeCharacters + characterCount;
 
+      Object.assign(audioDiagnostic, {
+        outputFilename: filename,
+        finalWavPayloadByteLength,
+        calculatedDurationMs: durationMs
+      });
+      console.info("[TTS_AUDIO_DIAGNOSTIC]", audioDiagnostic);
+
       res.json({
         audioUrl,
         durationMs,
@@ -601,11 +644,23 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
         lastVoiceProcessAt: new Date().toISOString()
       });
     } catch (err: any) {
+      const statusCode = err.statusCode || 500;
+      const errorCode = err.errorCode || "Internal Server Error";
+      const diagnostic = err.audioDiagnostic || audioDiagnostic;
+      if (diagnostic) {
+        console.error("[TTS_AUDIO_DIAGNOSTIC]", {
+          ...diagnostic,
+          outcome: "rejected",
+          errorCode
+        });
+      }
       console.error("[Voice Generation Error]", err);
-      res.status(500).json({
-        error: "Internal Server Error",
+      res.status(statusCode).json({
+        error: errorCode,
         message: err.message || "An unexpected error occurred during voice generation.",
-        status: 500,
+        status: statusCode,
+        providerMimeType: err.providerMimeType ?? diagnostic?.providerMimeType ?? null,
+        detectedFormat: err.detectedFormat ?? diagnostic?.detectedFormat ?? null,
         voiceProcessRunCount: providerAttemptRunCount,
         cumulativeVoiceCharacters: preservedCumulativeCharacters,
         lastVoiceProcessAt: providerAttemptStartedAt
