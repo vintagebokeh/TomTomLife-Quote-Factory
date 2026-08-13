@@ -44,6 +44,17 @@ export interface QuoteJob {
   videoUrl?: string; // final MP4 placeholder url
   failedStage?: string;
   errorMessage?: string;
+  // Build 5 Observability & Accounting Patch
+  textProcessRunCount: number;
+  lastTextProcessAt?: string | null;
+  lastInputTokens?: number | null;
+  lastOutputTokens?: number | null;
+  lastTotalTokens?: number | null;
+  lastLatencyMs?: number | null;
+  cumulativeInputTokens: number;
+  cumulativeOutputTokens: number;
+  cumulativeTotalTokens: number;
+  estimatedCost?: number | null;
 }
 
 // Clean service boundaries to be connected incrementally in later builds

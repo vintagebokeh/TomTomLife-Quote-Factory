@@ -17,6 +17,17 @@ CREATE TABLE IF NOT EXISTS quote_jobs (
   workflow_status VARCHAR(50) NOT NULL,
   failed_stage VARCHAR(100),
   error_message TEXT,
+  -- Build 5 Observability & Accounting Patch Columns
+  text_process_run_count INT DEFAULT 0 NOT NULL,
+  last_text_process_at TIMESTAMP WITH TIME ZONE,
+  last_input_tokens INT,
+  last_output_tokens INT,
+  last_total_tokens INT,
+  last_latency_ms INT,
+  cumulative_input_tokens INT DEFAULT 0 NOT NULL,
+  cumulative_output_tokens INT DEFAULT 0 NOT NULL,
+  cumulative_total_tokens INT DEFAULT 0 NOT NULL,
+  estimated_cost NUMERIC,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );

@@ -878,7 +878,13 @@ export default function App() {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ rawOcrText: job.rawOcr }),
+        body: JSON.stringify({
+          rawOcrText: job.rawOcr,
+          textProcessRunCount: job.textProcessRunCount || 0,
+          cumulativeInputTokens: job.cumulativeInputTokens || 0,
+          cumulativeOutputTokens: job.cumulativeOutputTokens || 0,
+          cumulativeTotalTokens: job.cumulativeTotalTokens || 0
+        }),
         credentials: "include"
       });
 
@@ -895,6 +901,19 @@ export default function App() {
 
       const data = await response.json();
       if (!response.ok) {
+        // If there's an invocation run count in the error response, we must increment and save it!
+        if (data && typeof data.textProcessRunCount === "number") {
+          setJob((prev) => {
+            const nextJob = {
+              ...prev,
+              textProcessRunCount: data.textProcessRunCount
+            };
+            if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+              saveJobToDb(nextJob).catch(err => console.error("Failed to save failed run count:", err));
+            }
+            return nextJob;
+          });
+        }
         throw new Error(data.message || data.error || `Server responded with status ${response.status}`);
       }
 
@@ -920,7 +939,17 @@ export default function App() {
           ...job,
           status: "TEXT_READY",
           cleanText: clean_text,
-          coreMeaning: core_meaning
+          coreMeaning: core_meaning,
+          textProcessRunCount: data.textProcessRunCount ?? ((job.textProcessRunCount || 0) + 1),
+          lastTextProcessAt: data.last_text_process_at || new Date().toISOString(),
+          lastInputTokens: data.last_input_tokens,
+          lastOutputTokens: data.last_output_tokens,
+          lastTotalTokens: data.last_total_tokens,
+          lastLatencyMs: data.last_latency_ms,
+          cumulativeInputTokens: data.cumulative_input_tokens ?? (job.cumulativeInputTokens || 0),
+          cumulativeOutputTokens: data.cumulative_output_tokens ?? (job.cumulativeOutputTokens || 0),
+          cumulativeTotalTokens: data.cumulative_total_tokens ?? (job.cumulativeTotalTokens || 0),
+          estimatedCost: data.estimated_cost || null
         };
         delete updatedJob.failedStage;
         delete updatedJob.errorMessage;
@@ -932,12 +961,26 @@ export default function App() {
           await saveJobToDb(updatedJob);
         }
       } else {
-        // Keep status as TEXT_PROCESSING
-        setJob((prev) => ({
-          ...prev,
-          status: "TEXT_PROCESSING"
-        }));
+        const updatedJob: QuoteJob = {
+          ...job,
+          status: "TEXT_PROCESSING",
+          textProcessRunCount: data.textProcessRunCount ?? ((job.textProcessRunCount || 0) + 1),
+          lastTextProcessAt: data.last_text_process_at || new Date().toISOString(),
+          lastInputTokens: data.last_input_tokens,
+          lastOutputTokens: data.last_output_tokens,
+          lastTotalTokens: data.last_total_tokens,
+          lastLatencyMs: data.last_latency_ms,
+          cumulativeInputTokens: data.cumulative_input_tokens ?? (job.cumulativeInputTokens || 0),
+          cumulativeOutputTokens: data.cumulative_output_tokens ?? (job.cumulativeOutputTokens || 0),
+          cumulativeTotalTokens: data.cumulative_total_tokens ?? (job.cumulativeTotalTokens || 0),
+          estimatedCost: data.estimated_cost || null
+        };
+        setJob(updatedJob);
         notify("Gemma processed text successfully! Awaiting your manual approval.", "success");
+
+        if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+          await saveJobToDb(updatedJob);
+        }
       }
 
     } catch (err: any) {
@@ -1814,6 +1857,36 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                         : "Run Gemma Processing"}
                     </span>
                   </button>
+                </div>
+
+                {/* Build 5 Observability Accounting Patch UI */}
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3.5 p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono">
+                  <div className="flex flex-col">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Runs</span>
+                    <span className="text-slate-800 font-bold mt-0.5">{job.textProcessRunCount || 0}</span>
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Last Latency</span>
+                    <span className="text-slate-800 font-bold mt-0.5">
+                      {job.lastLatencyMs ? `${(job.lastLatencyMs / 1000).toFixed(1)} s` : "N/A"}
+                    </span>
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Last Tokens</span>
+                    <span className="text-slate-800 font-bold mt-0.5">
+                      {job.lastTotalTokens ? job.lastTotalTokens.toLocaleString() : "N/A"}
+                    </span>
+                  </div>
+                  <div className="flex flex-col">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cumulative Tokens</span>
+                    <span className="text-slate-800 font-bold mt-0.5">
+                      {job.cumulativeTotalTokens ? job.cumulativeTotalTokens.toLocaleString() : 0}
+                    </span>
+                  </div>
+                  <div className="flex flex-col col-span-2 sm:col-span-1">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cost</span>
+                    <span className="text-slate-500 font-bold mt-0.5">N/A</span>
+                  </div>
                 </div>
 
                 {/* Processing State Loader */}

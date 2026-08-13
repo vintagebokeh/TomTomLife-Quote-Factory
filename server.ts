@@ -95,7 +95,7 @@ async function startServer() {
     }
   });
 
-  // Main Google Gemini Text Processing endpoint using Gemma 4 26B
+  // Main Google Gemini Text Processing endpoint using Gemma 4 26B with usage accounting patch
   app.post("/api/text-process", async (req, res) => {
     try {
       const apiKey = process.env.GEMINI_API_KEY;
@@ -135,32 +135,45 @@ You MUST return a valid JSON object matching this schema EXACTLY:
 
 Do NOT include any markdown code fences, preambles, explanation prose, or analysis. Return ONLY the raw JSON.`;
 
+      // Track how many REAL model invocations have been made.
+      // Increment only when the backend actually attempts a request to the Gemma model.
+      const nextRunCount = (req.body.textProcessRunCount || 0) + 1;
       let textResponse = "";
       let usageMetadata: any = null;
 
       try {
-        const aiRes = await ai.models.generateContent({
-          model: "gemma-4-26b-a4b-it",
-          contents: prompt,
-          config: {
-            responseMimeType: "application/json",
-            temperature: 0.1
-          }
+        try {
+          const aiRes = await ai.models.generateContent({
+            model: "gemma-4-26b-a4b-it",
+            contents: prompt,
+            config: {
+              responseMimeType: "application/json",
+              temperature: 0.1
+            }
+          });
+          textResponse = aiRes.text || "";
+          usageMetadata = aiRes.usageMetadata;
+        } catch (firstErr: any) {
+          console.warn("[Gemma Structured Call Warning] Retrying without strict json mime-type...", firstErr);
+          // Fallback retry without strict application/json configuration to avoid parameter incompatibility
+          const aiResFallback = await ai.models.generateContent({
+            model: "gemma-4-26b-a4b-it",
+            contents: prompt,
+            config: {
+              temperature: 0.1
+            }
+          });
+          textResponse = aiResFallback.text || "";
+          usageMetadata = aiResFallback.usageMetadata;
+        }
+      } catch (invocationError: any) {
+        console.error("[Gemma Invocation Error]", invocationError);
+        return res.status(502).json({
+          error: "PROVIDER_FAILURE",
+          message: invocationError.message || "The standard Gemma model invocation failed at provider level.",
+          status: 502,
+          textProcessRunCount: nextRunCount
         });
-        textResponse = aiRes.text || "";
-        usageMetadata = aiRes.usageMetadata;
-      } catch (firstErr: any) {
-        console.warn("[Gemma Structured Call Warning] Retrying without strict json mime-type...", firstErr);
-        // Fallback retry without strict application/json configuration to avoid parameter incompatibility
-        const aiResFallback = await ai.models.generateContent({
-          model: "gemma-4-26b-a4b-it",
-          contents: prompt,
-          config: {
-            temperature: 0.1
-          }
-        });
-        textResponse = aiResFallback.text || "";
-        usageMetadata = aiResFallback.usageMetadata;
       }
 
       let cleanedText = textResponse.trim();
@@ -178,7 +191,8 @@ Do NOT include any markdown code fences, preambles, explanation prose, or analys
         return res.status(422).json({
           error: "MALFORMED_OUTPUT",
           message: "The model did not return a parseable JSON object.",
-          rawOutput: textResponse
+          rawOutput: textResponse,
+          textProcessRunCount: nextRunCount
         });
       }
 
@@ -192,7 +206,8 @@ Do NOT include any markdown code fences, preambles, explanation prose, or analys
         return res.status(422).json({
           error: "INVALID_STRUCTURE",
           message: "Model output is missing required fields: 'clean_text', 'core_meaning', or 'language'.",
-          parsed
+          parsed,
+          textProcessRunCount: nextRunCount
         });
       }
 
@@ -201,10 +216,24 @@ Do NOT include any markdown code fences, preambles, explanation prose, or analys
       const output_tokens = usageMetadata?.candidatesTokenCount || null;
       const total_tokens = usageMetadata?.totalTokenCount || null;
 
+      const cumulative_input_tokens = (req.body.cumulativeInputTokens || 0) + (input_tokens || 0);
+      const cumulative_output_tokens = (req.body.cumulativeOutputTokens || 0) + (output_tokens || 0);
+      const cumulative_total_tokens = (req.body.cumulativeTotalTokens || 0) + (total_tokens || 0);
+
       res.json({
         clean_text: clean_text.trim(),
         core_meaning: core_meaning.trim(),
         language: language.trim().toLowerCase(),
+        textProcessRunCount: nextRunCount,
+        last_text_process_at: new Date().toISOString(),
+        last_input_tokens: input_tokens,
+        last_output_tokens: output_tokens,
+        last_total_tokens: total_tokens,
+        last_latency_ms: latency_ms,
+        cumulative_input_tokens,
+        cumulative_output_tokens,
+        cumulative_total_tokens,
+        estimated_cost: null,
         provenance: {
           provider: "google-gemini-api",
           model: "gemma-4-26b-a4b-it",

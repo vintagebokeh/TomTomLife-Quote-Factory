@@ -27,6 +27,17 @@ export interface QuoteJobRow {
   error_message: string | null;
   created_at?: string;
   updated_at?: string;
+  // Build 5 Observability & Accounting Patch Columns
+  text_process_run_count?: number;
+  last_text_process_at?: string | null;
+  last_input_tokens?: number | null;
+  last_output_tokens?: number | null;
+  last_total_tokens?: number | null;
+  last_latency_ms?: number | null;
+  cumulative_input_tokens?: number;
+  cumulative_output_tokens?: number;
+  cumulative_total_tokens?: number;
+  estimated_cost?: number | null;
 }
 
 export function mapRowToJob(row: QuoteJobRow): QuoteJob {
@@ -60,6 +71,17 @@ export function mapRowToJob(row: QuoteJobRow): QuoteJob {
     videoUrl: "https://assets.mixkit.co/videos/preview/mixkit-forest-stream-in-the-sunlight-529-large.mp4",
     failedStage: row.failed_stage || undefined,
     errorMessage: row.error_message || undefined,
+    // Build 5 Observability & Accounting Patch Mappings
+    textProcessRunCount: row.text_process_run_count ?? 0,
+    lastTextProcessAt: row.last_text_process_at || null,
+    lastInputTokens: row.last_input_tokens || null,
+    lastOutputTokens: row.last_output_tokens || null,
+    lastTotalTokens: row.last_total_tokens || null,
+    lastLatencyMs: row.last_latency_ms || null,
+    cumulativeInputTokens: row.cumulative_input_tokens ?? 0,
+    cumulativeOutputTokens: row.cumulative_output_tokens ?? 0,
+    cumulativeTotalTokens: row.cumulative_total_tokens ?? 0,
+    estimatedCost: row.estimated_cost || null,
   };
 }
 
@@ -79,6 +101,17 @@ export function mapJobToRow(job: QuoteJob): QuoteJobRow {
     workflow_status: job.status,
     failed_stage: job.failedStage || null,
     error_message: job.errorMessage || null,
+    // Build 5 Observability & Accounting Patch Mappings
+    text_process_run_count: job.textProcessRunCount,
+    last_text_process_at: job.lastTextProcessAt || null,
+    last_input_tokens: job.lastInputTokens || null,
+    last_output_tokens: job.lastOutputTokens || null,
+    last_total_tokens: job.lastTotalTokens || null,
+    last_latency_ms: job.lastLatencyMs || null,
+    cumulative_input_tokens: job.cumulativeInputTokens,
+    cumulative_output_tokens: job.cumulativeOutputTokens,
+    cumulative_total_tokens: job.cumulativeTotalTokens,
+    estimated_cost: job.estimatedCost || null,
   };
 }
 

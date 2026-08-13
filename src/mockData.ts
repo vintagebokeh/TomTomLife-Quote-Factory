@@ -27,5 +27,16 @@ export const initialMockJob: QuoteJob = {
     duration: "0:14"
   },
   videoStatus: "READY",
-  videoUrl: "https://assets.mixkit.co/videos/preview/mixkit-forest-stream-in-the-sunlight-529-large.mp4" // Standard stock video preview
+  videoUrl: "https://assets.mixkit.co/videos/preview/mixkit-forest-stream-in-the-sunlight-529-large.mp4", // Standard stock video preview
+  // Build 5 Observability & Accounting Patch Initializers
+  textProcessRunCount: 0,
+  lastTextProcessAt: null,
+  lastInputTokens: null,
+  lastOutputTokens: null,
+  lastTotalTokens: null,
+  lastLatencyMs: null,
+  cumulativeInputTokens: 0,
+  cumulativeOutputTokens: 0,
+  cumulativeTotalTokens: 0,
+  estimatedCost: null
 };
