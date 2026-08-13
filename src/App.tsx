@@ -1498,8 +1498,7 @@ export default function App() {
         nextJob.lastVoiceLatencyMs = data.latencyMs;
         nextJob.cumulativeVoiceCharacters = data.cumulativeVoiceCharacters;
         
-        // Cost: $0.015 per 1,000 characters
-        nextJob.voiceEstimatedCost = Number((nextJob.cumulativeVoiceCharacters * 0.000015).toFixed(6));
+        nextJob.voiceEstimatedCost = null;
 
         if (nextJob.femaleVoice.status === "GENERATED" && nextJob.maleVoice.status === "GENERATED") {
           nextJob.status = "AUDIO_READY";
