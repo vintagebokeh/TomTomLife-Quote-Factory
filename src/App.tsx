@@ -18,15 +18,50 @@ import {
   ChevronRight,
   Info,
   Sliders,
-  Maximize2
+  Maximize2,
+  UploadCloud,
+  Activity
 } from "lucide-react";
 import { QuoteJob, JobStatus, ScriptVariants } from "./types";
 import { initialMockJob } from "./mockData";
 import { services } from "./services/pipeline";
+import { supabaseService } from "./services/supabaseService";
 
 export default function App() {
   // Main state holding the active job
   const [job, setJob] = useState<QuoteJob>({ ...initialMockJob });
+
+  // Build 3 Local File Intake & Extraction States
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [sourcePreviewUrl, setSourcePreviewUrl] = useState<string | null>(null);
+  const [extractedFrameUrl, setExtractedFrameUrl] = useState<string | null>(null);
+  const [extractionStatus, setExtractionStatus] = useState<"IDLE" | "EXTRACTING" | "SUCCESS" | "FAILED">("IDLE");
+  const [extractionError, setExtractionError] = useState<string | null>(null);
+
+  // Build 4 OCR States
+  const [ocrStatus, setOcrStatus] = useState<"IDLE" | "PROCESSING" | "SUCCESS" | "FAILED">("IDLE");
+  const [ocrError, setOcrError] = useState<string | null>(null);
+  const [isVisionConfigured, setIsVisionConfigured] = useState<boolean | null>(null);
+
+  // Build 5 Text Processing States
+  const [autoAcceptAiText, setAutoAcceptAiText] = useState<boolean>(false);
+  const [textProcessingStatus, setTextProcessingStatus] = useState<"IDLE" | "PROCESSING" | "SUCCESS" | "FAILED">("IDLE");
+  const [textProcessingError, setTextProcessingError] = useState<string | null>(null);
+  const [aiCandidate, setAiCandidate] = useState<{
+    cleanText: string;
+    coreMeaning: string;
+    language: string;
+    provenance?: {
+      provider: string;
+      model: string;
+      live_model_used: string;
+      processed_at: string;
+      latency_ms: number;
+      input_tokens: number | null;
+      output_tokens: number | null;
+      total_tokens: number | null;
+    };
+  } | null>(null);
 
   // Custom simulation and error state variables
   const [isSimulating, setIsSimulating] = useState(false);
@@ -40,6 +75,12 @@ export default function App() {
   const [isRenderingVideo, setIsRenderingVideo] = useState(false);
   const [showNotification, setShowNotification] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
 
+  // Connection and saving states for Build 2
+  const [dbStatus, setDbStatus] = useState<"LOADING" | "CONNECTED" | "ERROR" | "NOT_CONFIGURED">("LOADING");
+  const [dbErrorMessage, setDbErrorMessage] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+
   // Audio simulation refs/state for visual feedback
   const animationFrameId = useRef<number | null>(null);
   const [audioWaveform, setAudioWaveform] = useState<number[]>([12, 24, 8, 16, 40, 18, 30, 10]);
@@ -51,6 +92,87 @@ export default function App() {
       setShowNotification(null);
     }, 4000);
   };
+
+  // Load Q000001 from Supabase on startup
+  useEffect(() => {
+    async function loadInitialData() {
+      // 1. Check Google Cloud Vision configuration status
+      try {
+        const configRes = await fetch("/api/config-status", {
+          credentials: "include"
+        });
+        
+        if (configRes.redirected || (configRes.url && (configRes.url.includes("cookie_check") || configRes.url.includes("aistudio.google.com")))) {
+          throw new Error("AI Studio Preview authentication required");
+        }
+
+        if (configRes.ok) {
+          const configData = await configRes.json();
+          setIsVisionConfigured(configData.configured);
+        } else {
+          setIsVisionConfigured(false);
+        }
+      } catch (configErr) {
+        console.warn("Failed to fetch Google Cloud Vision config status:", configErr);
+        setIsVisionConfigured(false);
+      }
+
+      // 2. Load Supabase data
+      setDbStatus("LOADING");
+      try {
+        if (!supabaseService.isConfigured()) {
+          setDbStatus("NOT_CONFIGURED");
+          console.log("Supabase is not configured yet. Operating in local mock offline fallback mode gracefully.");
+          return;
+        }
+        const fetchedJob = await supabaseService.loadJob("Q000001");
+        setJob(fetchedJob);
+        setDbStatus("CONNECTED");
+        setDbErrorMessage(null);
+        notify("Job Q000001 successfully loaded from Supabase.", "success");
+      } catch (err: any) {
+        console.warn("Supabase load warning (graceful fallback):", err);
+        setDbStatus("ERROR");
+        setDbErrorMessage(err.message || "Could not fetch data from Supabase.");
+        // Non-crashing fallback: job state remains initialized to initialMockJob.
+        notify(`Operating in Offline/Local Mode: ${err.message || "Connection refused."}`, "error");
+      }
+    }
+    loadInitialData();
+  }, []);
+
+  // Dedicated save handler
+  const saveJobToDb = async (updatedJob: QuoteJob) => {
+    if (!supabaseService.isConfigured()) {
+      return; // Do nothing silently in offline mode
+    }
+    setIsSaving(true);
+    try {
+      await supabaseService.saveJob(updatedJob);
+      setHasUnsavedChanges(false);
+      setDbStatus("CONNECTED");
+      setDbErrorMessage(null);
+      notify("Changes saved to Supabase successfully.", "success");
+    } catch (err: any) {
+      console.warn("Supabase save warning (handled):", err);
+      setDbStatus("ERROR");
+      setDbErrorMessage(err.message || "Failed to write to Supabase database.");
+      notify(`Database Sync Failed: ${err.message || "Connection lost"}`, "error");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Debounced auto-save effect for text field changes
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+
+    const delayDebounceFn = setTimeout(() => {
+      saveJobToDb(job);
+    }, 2000); // 2-second debounce for text edits
+
+    return () => clearTimeout(delayDebounceFn);
+  }, [job.cleanText, job.coreMeaning, job.scripts.scriptA, job.scripts.scriptB, job.scripts.scriptC]);
 
   // Simulated audio waveform movement when playing
   useEffect(() => {
@@ -96,7 +218,8 @@ export default function App() {
   const currentStageIndex = getStageIndex(job.status);
 
   // Directly change state (for testing / manual state overrides)
-  const setJobStatusDirectly = (status: JobStatus, failedStage?: string, errorMsg?: string) => {
+  const setJobStatusDirectly = async (status: JobStatus, failedStage?: string, errorMsg?: string) => {
+    let nextJob: QuoteJob | null = null;
     setJob((prev) => {
       const updated = { ...prev, status };
       if (status === "FAILED") {
@@ -106,9 +229,14 @@ export default function App() {
         delete updated.failedStage;
         delete updated.errorMessage;
       }
+      nextJob = updated;
       return updated;
     });
     notify(`Status switched to ${status}`, "info");
+
+    if (nextJob) {
+      await saveJobToDb(nextJob);
+    }
   };
 
   // Interactive step-by-step pipeline execution simulator
@@ -117,84 +245,166 @@ export default function App() {
     setIsSimulating(true);
 
     try {
+      let nextJob: QuoteJob | null = null;
+
       if (job.status === "NEW") {
-        setJob((prev) => ({ ...prev, status: "EXTRACTED" }));
-        notify("Frame extraction completed successfully.", "success");
+        if (selectedFile) {
+          setExtractionStatus("EXTRACTING");
+          setExtractionError(null);
+          try {
+            const frameUrl = await extractFrame(selectedFile);
+            setExtractedFrameUrl(frameUrl);
+            setExtractionStatus("SUCCESS");
+            
+            setJob((prev) => {
+              const next = { 
+                ...prev, 
+                status: "EXTRACTED" as JobStatus,
+                sourceUrl: frameUrl
+              };
+              delete next.failedStage;
+              delete next.errorMessage;
+              nextJob = next;
+              return next;
+            });
+            notify("Frame extraction completed successfully from local file.", "success");
+          } catch (err: any) {
+            const errMsg = err.message || "Extraction failed.";
+            setExtractionStatus("FAILED");
+            setExtractionError(errMsg);
+            
+            setJob((prev) => {
+              const next = { 
+                ...prev, 
+                status: "FAILED" as JobStatus,
+                failedStage: "Extract",
+                errorMessage: errMsg
+              };
+              nextJob = next;
+              return next;
+            });
+            notify(`Frame extraction failed: ${errMsg}`, "error");
+          }
+        } else {
+          notify("Real source file required. Please select a local image or video file to execute frame extraction.", "error");
+          setIsSimulating(false);
+          return;
+        }
       } else if (job.status === "EXTRACTED") {
-        setJob((prev) => ({ ...prev, status: "OCR_READY" }));
-        notify("OCR extraction succeeded. RAW text loaded.", "success");
+        if (selectedFile && extractedFrameUrl) {
+          setIsSimulating(false);
+          await handleRunOcr();
+          return;
+        } else {
+          notify("OCR requires a real extracted frame. Please select a local file and extract its frame first.", "error");
+          setIsSimulating(false);
+          return;
+        }
       } else if (job.status === "OCR_READY") {
         // Simulating the OCR Clean Text generation
         const ocrData = await services.ocr.extractText(job.sourceUrl);
-        setJob((prev) => ({
-          ...prev,
-          rawOcr: ocrData.rawOcr,
-          cleanText: ocrData.cleanText,
-          status: "TEXT_READY"
-        }));
+        setJob((prev) => {
+          const next = {
+            ...prev,
+            rawOcr: ocrData.rawOcr,
+            cleanText: ocrData.cleanText,
+            status: "TEXT_READY" as JobStatus
+          };
+          nextJob = next;
+          return next;
+        });
         notify("Clean Text compiled and formatted.", "success");
       } else if (job.status === "TEXT_READY") {
         // Extract meaning
         const coreMeaning = await services.meaning.extractCoreMeaning(job.cleanText);
-        setJob((prev) => ({
-          ...prev,
-          coreMeaning,
-          status: "SCRIPT_READY"
-        }));
+        setJob((prev) => {
+          const next = {
+            ...prev,
+            coreMeaning,
+            status: "SCRIPT_READY" as JobStatus
+          };
+          nextJob = next;
+          return next;
+        });
         notify("Core Meaning synthesized.", "success");
       } else if (job.status === "SCRIPT_READY") {
         // Generate scripts
         const scripts = await services.script.generateScripts(job.coreMeaning);
-        setJob((prev) => ({
-          ...prev,
-          scripts,
-          status: "AUDIO_READY"
-        }));
+        setJob((prev) => {
+          const next = {
+            ...prev,
+            scripts,
+            status: "AUDIO_READY" as JobStatus
+          };
+          nextJob = next;
+          return next;
+        });
         notify("Three creative scripts drafted.", "success");
       } else if (job.status === "AUDIO_READY") {
         // Voice Slot synthesis
-        setJob((prev) => ({
-          ...prev,
-          femaleVoice: { ...prev.femaleVoice, status: "GENERATED" },
-          maleVoice: { ...prev.maleVoice, status: "GENERATED" },
-          status: "VIDEO_READY"
-        }));
+        setJob((prev) => {
+          const next = {
+            ...prev,
+            femaleVoice: { ...prev.femaleVoice, status: "GENERATED" as const },
+            maleVoice: { ...prev.maleVoice, status: "GENERATED" as const },
+            status: "VIDEO_READY" as JobStatus
+          };
+          nextJob = next;
+          return next;
+        });
         notify("V1 Voice slots generated successfully.", "success");
       } else if (job.status === "VIDEO_READY") {
         // Video render step
         setIsRenderingVideo(true);
         let prog = 0;
-        const interval = setInterval(() => {
+        const interval = setInterval(async () => {
           prog += 10;
           setVideoRenderingProgress(prog);
           if (prog >= 100) {
             clearInterval(interval);
             setIsRenderingVideo(false);
             setVideoRenderingProgress(0);
-            setJob((prev) => ({
-              ...prev,
-              videoStatus: "READY",
-              status: "REVIEW"
-            }));
+            let finalJob: QuoteJob | null = null;
+            setJob((prev) => {
+              const next = {
+                ...prev,
+                videoStatus: "READY" as const,
+                status: "REVIEW" as JobStatus
+              };
+              finalJob = next;
+              return next;
+            });
             notify("Vertical video compilation finished! Assigned to human review.", "success");
+            if (finalJob) {
+              await saveJobToDb(finalJob);
+            }
           }
         }, 150);
         return;
       } else if (job.status === "REVIEW") {
-        setJob((prev) => ({ ...prev, status: "COMPLETED" }));
+        setJob((prev) => {
+          const next = { ...prev, status: "COMPLETED" as JobStatus };
+          nextJob = next;
+          return next;
+        });
         notify("Job approved & completed!", "success");
       } else {
         // If completed or failed, reset to beginning
-        resetToInitialMock();
-        notify("Workflow reset to default mock state.", "info");
+        await resetToInitialMock();
+      }
+
+      if (nextJob) {
+        await saveJobToDb(nextJob);
       }
     } catch (e: any) {
-      setJob((prev) => ({
-        ...prev,
-        status: "FAILED",
+      const failedJob: QuoteJob = {
+        ...job,
+        status: "FAILED" as JobStatus,
         failedStage: "AUTOMATED_PIPELINE",
         errorMessage: e.message || "An unexpected pipeline stage failure occurred."
-      }));
+      };
+      setJob(failedJob);
+      await saveJobToDb(failedJob);
     } finally {
       setIsSimulating(false);
     }
@@ -206,47 +416,585 @@ export default function App() {
     setIsRenderingVideo(true);
     setJob(prev => ({ ...prev, videoStatus: "RENDERING" }));
     let prog = 0;
-    const interval = setInterval(() => {
+    const interval = setInterval(async () => {
       prog += 20;
       setVideoRenderingProgress(prog);
       if (prog >= 100) {
         clearInterval(interval);
         setIsRenderingVideo(false);
         setVideoRenderingProgress(0);
-        setJob((prev) => ({
-          ...prev,
-          videoStatus: "READY",
-          status: "REVIEW"
-        }));
+        let finalJob: QuoteJob | null = null;
+        setJob((prev) => {
+          const next = {
+            ...prev,
+            videoStatus: "READY" as const,
+            status: "REVIEW" as JobStatus
+          };
+          finalJob = next;
+          return next;
+        });
         notify("Video composed at 1080x1920 MP4 resolution. Ready for Review.", "success");
+        if (finalJob) {
+          await saveJobToDb(finalJob);
+        }
       }
     }, 200);
   };
 
-  const resetToInitialMock = () => {
-    setJob({ ...initialMockJob });
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      processSelectedFile(e.target.files[0]);
+    }
+  };
+
+  const handleFileDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      processSelectedFile(e.dataTransfer.files[0]);
+    }
+  };
+
+  const handleClearFile = async () => {
+    // 1. Revoke active Object URLs when applicable
+    if (sourcePreviewUrl) {
+      try {
+        URL.revokeObjectURL(sourcePreviewUrl);
+      } catch (e) {}
+    }
+    if (extractedFrameUrl) {
+      try {
+        URL.revokeObjectURL(extractedFrameUrl);
+      } catch (e) {}
+    }
+
+    // 2. Clear local file objects and preview states
+    setSelectedFile(null);
+    setSourcePreviewUrl(null);
+    setExtractedFrameUrl(null);
+    setExtractionStatus("IDLE");
+    setExtractionError(null);
+    setOcrStatus("IDLE");
+    setOcrError(null);
+
+    // 3. Reset job source fields to mock defaults, status to "NEW"
+    const resetJob: QuoteJob = {
+      ...job,
+      sourceFilename: "Q000001_source.mp4",
+      sourceType: "video",
+      sourceUrl: "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?q=80&w=1200&auto=format&fit=crop",
+      status: "NEW",
+      rawOcr: ""
+    };
+
+    delete resetJob.failedStage;
+    delete resetJob.errorMessage;
+
+    setJob(resetJob);
+    notify("Source file cleared and intake reset to Drag & Drop.", "info");
+
+    // 4. Update the Supabase database with reset metadata
+    if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+      await saveJobToDb(resetJob);
+    }
+  };
+
+  const getOptimizedBase64 = async (blobUrl: string): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement("canvas");
+          const MAX_WIDTH = 1200;
+          const MAX_HEIGHT = 1200;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > MAX_WIDTH || height > MAX_HEIGHT) {
+            if (width > height) {
+              height = Math.round((height * MAX_WIDTH) / width);
+              width = MAX_WIDTH;
+            } else {
+              width = Math.round((width * MAX_HEIGHT) / height);
+              height = MAX_HEIGHT;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            throw new Error("Could not get 2D canvas context.");
+          }
+
+          ctx.drawImage(img, 0, 0, width, height);
+          const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+          resolve(dataUrl);
+        } catch (err) {
+          reject(err);
+        }
+      };
+      img.onerror = () => {
+        // Fallback to raw FileReader base64 reader if image rendering fails
+        fetch(blobUrl)
+          .then((res) => res.blob())
+          .then((blob) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          })
+          .catch(reject);
+      };
+      img.src = blobUrl;
+    });
+  };
+
+  const handleRunOcr = async () => {
+    // 1. Verify if a real extracted frame exists
+    if (!selectedFile || !extractedFrameUrl) {
+      notify("OCR requires a real extracted frame. Please select a local file and extract its frame first.", "error");
+      return;
+    }
+
+    setOcrStatus("PROCESSING");
+    setOcrError(null);
+
+    notify("Starting Google Cloud Vision managed OCR engine (Thai support)...", "info");
+    try {
+      // Convert Blob URL of extracted frame to optimized base64
+      const base64Data = await getOptimizedBase64(extractedFrameUrl);
+
+      const targetUrl = "/api/ocr-vision";
+      const response = await fetch(targetUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ imageBase64: base64Data }),
+        credentials: "include"
+      });
+
+      if (response.redirected || (response.url && (response.url.includes("cookie_check") || response.url.includes("aistudio.google.com")))) {
+        throw new Error("AI Studio Preview authentication required. Please ensure cookies are allowed or reload the application.");
+      }
+
+      const contentType = response.headers.get("Content-Type") || "";
+
+      if (!contentType.includes("application/json")) {
+        const rawResponseText = await response.text();
+        const snippet = rawResponseText.substring(0, 300);
+        const diagMsg = `Integration Error: Received non-JSON response from ${targetUrl}.\n` +
+                        `HTTP Status: ${response.status} (${response.statusText})\n` +
+                        `Content-Type: ${contentType}\n` +
+                        `Response Snippet: ${snippet}`;
+        throw new Error(diagMsg);
+      }
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        const errMsg = data.message || data.error || `Vision API request failed with status ${response.status}.`;
+        throw new Error(errMsg);
+      }
+
+      const rawText = data.text || "";
+
+      // Complete and update state
+      setOcrStatus("SUCCESS");
+      setTextProcessingStatus("IDLE");
+      setTextProcessingError(null);
+      setAiCandidate(null);
+
+      const updatedJob: QuoteJob = {
+        ...job,
+        status: "OCR_READY",
+        rawOcr: rawText,
+        cleanText: "",
+        coreMeaning: ""
+      };
+
+      // Clear any failed stage fields
+      delete updatedJob.failedStage;
+      delete updatedJob.errorMessage;
+
+      setJob(updatedJob);
+      notify("Google Cloud Vision OCR completed successfully!", "success");
+
+      // Persist to Supabase
+      if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+        await saveJobToDb(updatedJob);
+      }
+    } catch (err: any) {
+      const errMsg = err.message || "Failed to parse text with Google Cloud Vision.";
+      setOcrStatus("FAILED");
+      setOcrError(errMsg);
+
+      const failedJob: QuoteJob = {
+        ...job,
+        status: "FAILED",
+        failedStage: "OCR",
+        errorMessage: errMsg
+      };
+      setJob(failedJob);
+      notify(`Google Cloud Vision OCR Failure: ${errMsg}`, "error");
+
+      if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+        await saveJobToDb(failedJob);
+      }
+    }
+  };
+
+  const processSelectedFile = async (file: File) => {
+    // 1. Validate file extension or mime type
+    const isImage = file.type.startsWith("image/") || /\.(jpg|jpeg|png|webp)$/i.test(file.name);
+    const isVideo = file.type.startsWith("video/") || /\.(mp4|mov|webm)$/i.test(file.name);
+
+    if (!isImage && !isVideo) {
+      notify("Unsupported file type! Please select an image (.jpg, .jpeg, .png, .webp) or video (.mp4, .mov, .webm).", "error");
+      return;
+    }
+
+    // 2. Set local selection and preview URL
+    setSelectedFile(file);
+    const previewUrl = URL.createObjectURL(file);
+    setSourcePreviewUrl(previewUrl);
+    setExtractedFrameUrl(null);
+    setExtractionStatus("IDLE");
+    setExtractionError(null);
+    setOcrStatus("IDLE");
+    setOcrError(null);
+    setTextProcessingStatus("IDLE");
+    setTextProcessingError(null);
+    setAiCandidate(null);
+
+    const detectedType = isImage ? "image" : "video";
+
+    // 3. Update the job metadata
+    const updatedJob: QuoteJob = {
+      ...job,
+      sourceFilename: file.name,
+      sourceType: detectedType,
+      status: "NEW", // Reset status to NEW for frame extraction
+      sourceUrl: previewUrl, // Temporarily use original preview until extracted
+      rawOcr: "", // Clear downstream raw OCR
+      cleanText: "", // Clear downstream clean text
+      coreMeaning: "" // Clear downstream core meaning
+    };
+    
+    // Clear failure details if resetting
+    delete updatedJob.failedStage;
+    delete updatedJob.errorMessage;
+
+    setJob(updatedJob);
+    notify(`Local ${detectedType} source selected: ${file.name}`, "success");
+
+    // 4. Save metadata to Supabase (Build 2 spec)
+    if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+      await saveJobToDb(updatedJob);
+    }
+  };
+
+  const extractFrame = async (fileToExtract: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const isImage = fileToExtract.type.startsWith("image/") || /\.(jpg|jpeg|png|webp)$/i.test(fileToExtract.name);
+      
+      if (isImage) {
+        // Image itself becomes the extracted source frame. No transformation.
+        resolve(URL.createObjectURL(fileToExtract));
+        return;
+      }
+
+      // Extract first usable frame of video natively in browser
+      const video = document.createElement("video");
+      video.preload = "auto";
+      video.muted = true;
+      video.playsInline = true;
+      
+      const videoUrl = URL.createObjectURL(fileToExtract);
+      video.src = videoUrl;
+
+      const cleanUp = () => {
+        video.removeAttribute("src");
+        video.load();
+      };
+
+      video.onloadedmetadata = () => {
+        // Seek to 0.0 seconds (use first usable video frame)
+        video.currentTime = 0.0;
+      };
+
+      video.onseeked = () => {
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = video.videoWidth || 640;
+          canvas.height = video.videoHeight || 360;
+          
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            throw new Error("Could not get 2D canvas context.");
+          }
+          
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+          
+          cleanUp();
+          resolve(dataUrl);
+        } catch (err: any) {
+          cleanUp();
+          reject(err);
+        }
+      };
+
+      video.onerror = () => {
+        cleanUp();
+        reject(new Error("Failed to load or parse video source file."));
+      };
+
+      // Fallback timeout
+      setTimeout(() => {
+        cleanUp();
+        reject(new Error("Timeout during video frame extraction. Ensure the video format is supported."));
+      }, 10000);
+    });
+  };
+
+  const handleExtractFrame = async () => {
+    if (!selectedFile) {
+      notify("Please select a local source file first.", "error");
+      return;
+    }
+
+    setExtractionStatus("EXTRACTING");
+    setExtractionError(null);
+    notify("Extracting representative keyframe...", "info");
+
+    try {
+      const frameUrl = await extractFrame(selectedFile);
+      setExtractedFrameUrl(frameUrl);
+      setExtractionStatus("SUCCESS");
+      setOcrStatus("IDLE");
+      setOcrError(null);
+      setTextProcessingStatus("IDLE");
+      setTextProcessingError(null);
+      setAiCandidate(null);
+
+      const updatedJob: QuoteJob = {
+        ...job,
+        status: "EXTRACTED",
+        sourceUrl: frameUrl,
+        rawOcr: "",
+        cleanText: "",
+        coreMeaning: ""
+      };
+      delete updatedJob.failedStage;
+      delete updatedJob.errorMessage;
+
+      setJob(updatedJob);
+      notify("Keyframe extraction completed successfully!", "success");
+
+      if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+        await saveJobToDb(updatedJob);
+      }
+    } catch (err: any) {
+      const errMsg = err.message || "Failed to extract keyframe natively.";
+      setExtractionStatus("FAILED");
+      setExtractionError(errMsg);
+
+      const failedJob: QuoteJob = {
+        ...job,
+        status: "FAILED",
+        failedStage: "Extract",
+        errorMessage: errMsg
+      };
+      setJob(failedJob);
+      notify(`Extraction failure: ${errMsg}`, "error");
+
+      if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+        await saveJobToDb(failedJob);
+      }
+    }
+  };
+
+  const resetToInitialMock = async () => {
+    const defaultJob = { ...initialMockJob };
+    setSelectedFile(null);
+    setSourcePreviewUrl(null);
+    setExtractedFrameUrl(null);
+    setExtractionStatus("IDLE");
+    setExtractionError(null);
+    setOcrStatus("IDLE");
+    setOcrError(null);
+    setTextProcessingStatus("IDLE");
+    setTextProcessingError(null);
+    setAiCandidate(null);
+    setJob(defaultJob);
     setPlayingVoice(null);
     setPlayingVideo(false);
-    notify("Job loaded: Q000001 Workspace reset.", "info");
+    notify("Job Q000001 Workspace reset to default demo values.", "info");
+    if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+      await saveJobToDb(defaultJob);
+    }
   };
 
   // Update handlers for edited values
   const handleCleanTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setJob((prev) => ({ ...prev, cleanText: e.target.value }));
+    setJob((prev) => {
+      const next = { ...prev, cleanText: e.target.value };
+      setHasUnsavedChanges(true);
+      return next;
+    });
   };
 
   const handleCoreMeaningChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setJob((prev) => ({ ...prev, coreMeaning: e.target.value }));
+    setJob((prev) => {
+      const next = { ...prev, coreMeaning: e.target.value };
+      setHasUnsavedChanges(true);
+      return next;
+    });
+  };
+
+  const handleRunTextProcessing = async () => {
+    if (!job.rawOcr || job.rawOcr.trim() === "") {
+      notify("Text Processing requires non-empty Raw OCR text. Please run OCR first.", "error");
+      return;
+    }
+
+    setTextProcessingStatus("PROCESSING");
+    setTextProcessingError(null);
+    setAiCandidate(null);
+
+    notify("Sending Raw OCR to server-side Gemma 4 26B A4B engine...", "info");
+
+    try {
+      // Set status to TEXT_PROCESSING
+      setJob((prev) => ({
+        ...prev,
+        status: "TEXT_PROCESSING"
+      }));
+
+      const response = await fetch("/api/text-process", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ rawOcrText: job.rawOcr }),
+        credentials: "include"
+      });
+
+      if (response.redirected || (response.url && (response.url.includes("cookie_check") || response.url.includes("aistudio.google.com")))) {
+        throw new Error("AI Studio Preview authentication required. Please ensure cookies are allowed or reload the application.");
+      }
+
+      const contentType = response.headers.get("Content-Type") || "";
+      if (!contentType.includes("application/json")) {
+        const rawResText = await response.text();
+        const snippet = rawResText.substring(0, 300);
+        throw new Error(`Received non-JSON response from server.\nHTTP Status: ${response.status}\nSnippet: ${snippet}`);
+      }
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || data.error || `Server responded with status ${response.status}`);
+      }
+
+      const { clean_text, core_meaning, language, provenance } = data;
+
+      if (!clean_text || !core_meaning || !language) {
+        throw new Error("Invalid structure returned from the Text Processing API.");
+      }
+
+      setTextProcessingStatus("SUCCESS");
+
+      const candidateData = {
+        cleanText: clean_text,
+        coreMeaning: core_meaning,
+        language,
+        provenance
+      };
+
+      setAiCandidate(candidateData);
+
+      if (autoAcceptAiText) {
+        const updatedJob: QuoteJob = {
+          ...job,
+          status: "TEXT_READY",
+          cleanText: clean_text,
+          coreMeaning: core_meaning
+        };
+        delete updatedJob.failedStage;
+        delete updatedJob.errorMessage;
+
+        setJob(updatedJob);
+        notify("Gemma Text Processing succeeded & auto-accepted!", "success");
+
+        if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+          await saveJobToDb(updatedJob);
+        }
+      } else {
+        // Keep status as TEXT_PROCESSING
+        setJob((prev) => ({
+          ...prev,
+          status: "TEXT_PROCESSING"
+        }));
+        notify("Gemma processed text successfully! Awaiting your manual approval.", "success");
+      }
+
+    } catch (err: any) {
+      const errMsg = err.message || "Failed to process text using Gemma 4.";
+      setTextProcessingStatus("FAILED");
+      setTextProcessingError(errMsg);
+
+      const failedJob: QuoteJob = {
+        ...job,
+        status: "FAILED",
+        failedStage: "TEXT",
+        errorMessage: errMsg
+      };
+      setJob(failedJob);
+      notify(`Text Processing Failure: ${errMsg}`, "error");
+
+      if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+        await saveJobToDb(failedJob);
+      }
+    }
+  };
+
+  const handleAcceptAiText = async () => {
+    if (!aiCandidate) {
+      notify("No AI text candidate to accept.", "error");
+      return;
+    }
+
+    const updatedJob: QuoteJob = {
+      ...job,
+      status: "TEXT_READY",
+      cleanText: aiCandidate.cleanText,
+      coreMeaning: aiCandidate.coreMeaning
+    };
+    delete updatedJob.failedStage;
+    delete updatedJob.errorMessage;
+
+    setJob(updatedJob);
+    notify("AI Text Candidate accepted & synced to canonical fields successfully!", "success");
+
+    if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+      await saveJobToDb(updatedJob);
+    }
   };
 
   const handleScriptChange = (variant: "scriptA" | "scriptB" | "scriptC", text: string) => {
-    setJob((prev) => ({
-      ...prev,
-      scripts: {
-        ...prev.scripts,
-        [variant]: text
-      }
-    }));
+    setJob((prev) => {
+      const next = {
+        ...prev,
+        scripts: {
+          ...prev.scripts,
+          [variant]: text
+        }
+      };
+      setHasUnsavedChanges(true);
+      return next;
+    });
   };
 
   // Toggle voice audio simulator play
@@ -260,19 +1008,23 @@ export default function App() {
   };
 
   // Review Actions
-  const handleApprove = () => {
-    setJob((prev) => ({ ...prev, status: "COMPLETED" }));
+  const handleApprove = async () => {
+    const updatedJob: QuoteJob = { ...job, status: "COMPLETED" };
+    setJob(updatedJob);
     notify("Job Q000001 status set to COMPLETED. Ready for publication.", "success");
+    await saveJobToDb(updatedJob);
   };
 
-  const handleReject = () => {
-    setJob((prev) => ({
-      ...prev,
+  const handleReject = async () => {
+    const updatedJob: QuoteJob = {
+      ...job,
       status: "FAILED",
       failedStage: "Human Review",
       errorMessage: "Content was rejected by the supervisor: Pronunciation or styling requires adjustments."
-    }));
+    };
+    setJob(updatedJob);
     notify("Job Q000001 was rejected. Status changed to FAILED.", "error");
+    await saveJobToDb(updatedJob);
   };
 
   return (
@@ -288,7 +1040,7 @@ export default function App() {
             <div>
               <div className="flex items-center space-x-2">
                 <span className="text-[10px] uppercase font-bold tracking-wider text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
-                  V1.0 — Build 1
+                  V1.0 — Build 2
                 </span>
               </div>
               <h1 className="text-lg font-bold tracking-tight text-slate-900">
@@ -297,8 +1049,52 @@ export default function App() {
             </div>
           </div>
 
-          {/* Quick Actions & Job Quick Stats */}
+          {/* Quick Actions, Database Status & Job Quick Stats */}
           <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+            
+            {/* Database Connection State Badge */}
+            {dbStatus === "LOADING" && (
+              <div className="bg-amber-50 border border-amber-200 text-amber-700 px-2.5 py-1 rounded-lg flex items-center space-x-1.5 text-xs font-semibold animate-pulse" id="db-loading-badge">
+                <span className="h-2 w-2 rounded-full bg-amber-500 animate-ping"></span>
+                <span>Connecting DB...</span>
+              </div>
+            )}
+            {dbStatus === "CONNECTED" && (
+              <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 px-2.5 py-1 rounded-lg flex items-center space-x-1.5 text-xs font-semibold" id="db-connected-badge">
+                <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
+                <span>Supabase Connected</span>
+                {hasUnsavedChanges && (
+                  <span className="text-[9px] bg-amber-100 text-amber-800 px-1.5 py-0.2 rounded animate-pulse ml-1 font-mono">
+                    {isSaving ? "Saving..." : "Unsaved"}
+                  </span>
+                )}
+              </div>
+            )}
+            {dbStatus === "ERROR" && (
+              <div className="bg-rose-50 border border-rose-200 text-rose-700 px-2.5 py-1 rounded-lg flex items-center space-x-1.5 text-xs font-semibold cursor-help" id="db-disconnected-badge" title={dbErrorMessage || "Could not connect to database"}>
+                <span className="h-2 w-2 rounded-full bg-rose-500"></span>
+                <span>DB Offline (Fallback)</span>
+              </div>
+            )}
+            {dbStatus === "NOT_CONFIGURED" && (
+              <div className="bg-slate-100 border border-slate-200 text-slate-600 px-2.5 py-1 rounded-lg flex items-center space-x-1.5 text-xs font-semibold cursor-help" id="db-not-configured-badge" title="Supabase client is not configured. Connect your database to enable cloud persistence.">
+                <span className="h-2 w-2 rounded-full bg-slate-400"></span>
+                <span>DB Offline (Demo)</span>
+              </div>
+            )}
+
+            {/* Manual Save Button */}
+            {dbStatus === "CONNECTED" && hasUnsavedChanges && (
+              <button
+                onClick={() => saveJobToDb(job)}
+                disabled={isSaving}
+                className="bg-blue-50 border border-blue-200 hover:bg-blue-100 text-blue-700 px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center space-x-1 transition cursor-pointer"
+                id="btn-save-db"
+              >
+                <span>{isSaving ? "Saving..." : "Save Now"}</span>
+              </button>
+            )}
+
             <div className="bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1 flex items-center space-x-2 text-xs text-slate-600">
               <span className="font-semibold text-slate-800">Active Job:</span>
               <span className="bg-white px-2 py-0.5 rounded font-mono text-xs border border-slate-200 text-blue-600">
@@ -430,6 +1226,59 @@ export default function App() {
       {/* Main Container */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-1 w-full">
         
+        {/* Database connection failure banner */}
+        {dbStatus === "ERROR" && (
+          <div className="bg-rose-50 border border-rose-200 rounded-xl p-5 mb-6 flex items-start space-x-3.5 text-rose-900 animate-fade-in" id="db-error-alert-banner">
+            <AlertCircle className="h-5 w-5 text-rose-600 shrink-0 mt-0.5" />
+            <div className="space-y-2 w-full">
+              <h4 className="font-bold text-xs text-rose-950 uppercase tracking-wider">Supabase Schema / Connection Setup Required</h4>
+              <p className="text-xs text-rose-800 leading-relaxed">
+                A database connection was successfully established, but a database schema or table missing error was detected. To enable cloud persistence, you must provision the target table in your Supabase project.
+              </p>
+              
+              <div className="text-[11px] font-mono bg-white border border-rose-200/50 p-3 rounded-lg mt-2 text-slate-600 space-y-2">
+                <div>
+                  <p className="font-bold text-rose-700">Database Message Details:</p>
+                  <p className="whitespace-pre-wrap">{dbErrorMessage || "Could not connect to database."}</p>
+                </div>
+                
+                {dbErrorMessage && dbErrorMessage.includes("quote_jobs") && (
+                  <div className="border-t border-slate-100 pt-2.5 mt-2 space-y-2">
+                    <p className="font-bold text-blue-700 uppercase text-[10px] tracking-wider">Required Table Setup SQL Statement:</p>
+                    <p className="text-slate-400 mb-1.5 text-[10px]">Copy and paste the statement below into your Supabase SQL Editor:</p>
+                    <pre className="bg-slate-950 text-slate-200 p-3 rounded-md overflow-x-auto text-[10px] leading-normal whitespace-pre">
+{`CREATE TABLE IF NOT EXISTS quote_jobs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  content_id VARCHAR(50) UNIQUE NOT NULL,
+  source_filename TEXT NOT NULL,
+  source_type VARCHAR(20) NOT NULL,
+  raw_ocr_text TEXT NOT NULL,
+  clean_text TEXT NOT NULL,
+  core_meaning TEXT NOT NULL,
+  script_a TEXT NOT NULL,
+  script_b TEXT NOT NULL,
+  script_c TEXT NOT NULL,
+  female_voice_id VARCHAR(100) NOT NULL,
+  male_voice_id VARCHAR(100) NOT NULL,
+  workflow_status VARCHAR(50) NOT NULL,
+  failed_stage VARCHAR(100),
+  error_message TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+ALTER TABLE quote_jobs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow public read and write access for development" 
+ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
+                    </pre>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Dynamic Warning Notification */}
         {showNotification && (
           <div className={`fixed bottom-6 right-6 z-50 p-4 rounded-xl shadow-lg border flex items-center space-x-3 transition-all duration-300 transform translate-y-0 ${
@@ -456,96 +1305,342 @@ export default function App() {
               <div className="border-b border-slate-200/60 bg-white px-5 py-3.5 flex items-center justify-between">
                 <div className="flex items-center space-x-2.5">
                   <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-50 border border-blue-100 text-blue-600 text-[11px] font-bold">1</span>
-                  <h3 className="font-black text-slate-400 tracking-widest text-[10px] uppercase">SOURCE MEDIA</h3>
+                  <h3 className="font-black text-slate-400 tracking-widest text-[10px] uppercase">SOURCE MEDIA INTAKE</h3>
                 </div>
                 <span className="text-[10px] text-slate-400 font-mono tracking-wider">ID: {job.contentId}</span>
               </div>
               
               <div className="p-5">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  {/* Media Details */}
+                  {/* Left Column: Local File Upload & Metadata */}
                   <div className="space-y-4">
                     <div>
-                      <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Source Filename</span>
-                      <p className="text-slate-800 font-mono text-xs bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200/80 inline-block break-all select-all">
-                        {job.sourceFilename}
-                      </p>
+                      <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Local Media Selection</span>
+                      
+                      {!selectedFile ? (
+                        <div 
+                          className="border border-dashed border-slate-300 hover:border-blue-500 rounded-xl p-5 bg-slate-50/40 hover:bg-slate-50 transition-all flex flex-col items-center justify-center text-center cursor-pointer relative group"
+                          id="file-drop-area"
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={handleFileDrop}
+                          onClick={() => document.getElementById("file-input-id")?.click()}
+                        >
+                          <input 
+                            type="file" 
+                            id="file-input-id" 
+                            className="hidden" 
+                            accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.webm" 
+                            onChange={handleFileSelect} 
+                          />
+                          <UploadCloud className="h-7 w-7 text-slate-400 group-hover:text-blue-500 transition mb-2" />
+                          <p className="text-xs font-bold text-slate-700">Drag & drop or browse</p>
+                          <p className="text-[9px] text-slate-400 mt-0.5">Images (.jpg, .png, .webp) or Videos (.mp4, .mov, .webm)</p>
+                        </div>
+                      ) : (
+                        <div className="bg-slate-50/80 border border-slate-200 p-3.5 rounded-xl flex items-center justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-mono font-bold text-slate-800 truncate" title={selectedFile.name}>
+                              {selectedFile.name}
+                            </p>
+                            <p className="text-[10px] text-slate-400 font-medium">
+                              Size: {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB • {job.sourceType.toUpperCase()}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              onClick={() => document.getElementById("file-input-id")?.click()}
+                              className="text-[10px] font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded px-2.5 py-1.5 transition cursor-pointer"
+                            >
+                              Change File
+                            </button>
+                            <button
+                              onClick={handleClearFile}
+                              className="text-[10px] font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded px-2.5 py-1.5 transition cursor-pointer"
+                            >
+                              Clear
+                            </button>
+                          </div>
+                          <input 
+                            type="file" 
+                            id="file-input-id" 
+                            className="hidden" 
+                            accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.webm" 
+                            onChange={handleFileSelect} 
+                          />
+                        </div>
+                      )}
                     </div>
 
-                    <div>
-                      <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Source Type</span>
-                      <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-600 border border-blue-100 uppercase font-mono">
-                        {job.sourceType}
-                      </span>
-                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Source Filename</span>
+                        <p className="text-slate-800 font-mono text-[11px] bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-200/80 break-all select-all font-bold">
+                          {job.sourceFilename}
+                        </p>
+                      </div>
 
-                    <div>
-                      <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Current Workflow Status</span>
-                      <div className="flex items-center space-x-2">
-                        <span className={`inline-flex items-center px-2.5 py-0.5 rounded text-[10px] font-bold uppercase ${
-                          job.status === "COMPLETED" 
-                            ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                            : job.status === "FAILED"
-                            ? "bg-rose-50 text-rose-700 border border-rose-200"
-                            : "bg-blue-50 text-blue-700 border border-blue-200 animate-pulse"
-                        }`}>
-                          {job.status}
+                      <div>
+                        <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Source Type</span>
+                        <span className="inline-flex items-center px-2 py-1 rounded text-[10px] font-black bg-blue-50 text-blue-600 border border-blue-100 uppercase font-mono tracking-wider">
+                          {job.sourceType}
                         </span>
                       </div>
                     </div>
 
-                    <div className="pt-2">
-                      <div className="p-3.5 bg-blue-50/40 border border-blue-100/60 rounded-xl text-xs text-blue-900">
-                        <p className="font-bold flex items-center gap-1.5 text-blue-950 mb-1">
+                    <div>
+                      <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Current Workflow Status</span>
+                      <span className={`inline-flex items-center px-2.5 py-1 rounded text-[10px] font-black uppercase tracking-wider ${
+                        job.status === "COMPLETED" 
+                          ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                          : job.status === "FAILED"
+                          ? "bg-rose-50 text-rose-700 border border-rose-200"
+                          : "bg-blue-50 text-blue-700 border border-blue-200 animate-pulse"
+                      }`}>
+                        {job.status}
+                      </span>
+                    </div>
+
+                    <div className="pt-1">
+                      <div className="p-3 bg-blue-50/40 border border-blue-100/60 rounded-xl text-xs text-blue-900 leading-relaxed">
+                        <p className="font-bold flex items-center gap-1.5 text-blue-950 mb-0.5">
                           <Info className="h-3.5 w-3.5 shrink-0" />
                           About this Intake Media
                         </p>
-                        This video clip is a high-quality keynote recording. Extracting frames will provide key slides and presenter close-ups for generating beautiful overlay quote designs.
+                        Providing high-quality keynote clips or slides allows TomTomLife to extract perfect keyframes for short-form quote overlay compositions.
                       </div>
                     </div>
                   </div>
 
-                  {/* Media Preview Placeholder */}
+                  {/* Right Column: Media Preview */}
                   <div>
-                    <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Media Preview Placeholder</span>
-                    <div className="relative aspect-video rounded-xl bg-slate-950 overflow-hidden border border-slate-200/80 shadow-inner group flex items-center justify-center">
-                      <img 
-                        src={job.sourceUrl} 
-                        alt="Intake video frame thumbnail" 
-                        className="absolute inset-0 w-full h-full object-cover opacity-70 group-hover:scale-105 transition-all duration-500"
-                        referrerPolicy="no-referrer"
-                      />
-                      <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-transparent to-transparent"></div>
-                      
-                      {/* Play/Overlay element to represent video */}
-                      <div className="z-10 text-center p-4">
-                        <div className="inline-flex items-center justify-center h-10 w-10 rounded-full bg-white/10 backdrop-blur-md text-white border border-white/20 mb-2">
-                          <Video className="h-4.5 w-4.5" />
-                        </div>
-                        <p className="text-white font-bold text-xs tracking-wider">Source Intake Preview</p>
-                        <p className="text-slate-300 text-[10px] mt-1 font-mono">{job.sourceFilename}</p>
-                      </div>
-
-                      <span className="absolute bottom-3 right-3 text-[9px] font-mono px-1.5 py-0.5 rounded bg-black/60 text-white">
-                        0:15 Secs
-                      </span>
+                    <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Local Media Source Preview</span>
+                    <div className="relative aspect-video rounded-xl bg-slate-950 overflow-hidden border border-slate-200 shadow-inner flex items-center justify-center">
+                      {selectedFile && sourcePreviewUrl ? (
+                        job.sourceType === "image" ? (
+                          <img 
+                            src={sourcePreviewUrl} 
+                            alt="Local image source preview" 
+                            className="w-full h-full object-contain"
+                          />
+                        ) : (
+                          <video 
+                            src={sourcePreviewUrl} 
+                            controls 
+                            className="w-full h-full object-contain"
+                          />
+                        )
+                      ) : (
+                        /* Default mock fallback preview */
+                        <>
+                          <img 
+                            src={job.sourceUrl} 
+                            alt="Intake video frame thumbnail" 
+                            className="absolute inset-0 w-full h-full object-cover opacity-70"
+                            referrerPolicy="no-referrer"
+                          />
+                          <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-transparent to-transparent"></div>
+                          <div className="z-10 text-center p-4">
+                            <div className="inline-flex items-center justify-center h-9 w-9 rounded-full bg-white/10 backdrop-blur-md text-white border border-white/20 mb-1.5">
+                              <Video className="h-4 w-4" />
+                            </div>
+                            <p className="text-white font-bold text-xs tracking-wider">Default Intake Preview</p>
+                            <p className="text-slate-300 text-[10px] mt-0.5 font-mono">{job.sourceFilename}</p>
+                          </div>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
+
+                {selectedFile && (
+                  <div className="mt-6 pt-5 border-t border-slate-100">
+                    <div className="bg-blue-50/45 border border-blue-100 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                      <div>
+                        <div className="flex items-center gap-1.5 mb-1">
+                          <span className="inline-flex h-2 w-2 rounded-full bg-blue-600 animate-pulse"></span>
+                          <span className="text-[10px] font-black text-blue-800 uppercase tracking-widest">Next Step Recommendation</span>
+                        </div>
+                        <p className="text-xs text-blue-950 font-semibold leading-relaxed">
+                          Review the selected source preview. When you are ready, trigger frame extraction to isolate a high-fidelity keyframe.
+                        </p>
+                      </div>
+                      <button
+                        onClick={handleExtractFrame}
+                        disabled={extractionStatus === "EXTRACTING"}
+                        className="shrink-0 inline-flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white font-black px-4.5 py-2.5 rounded-lg text-[10px] uppercase tracking-widest transition cursor-pointer shadow-xs whitespace-nowrap"
+                        id="btn-source-extract-action"
+                      >
+                        <Sparkles className={`h-3.5 w-3.5 shrink-0 ${extractionStatus === "EXTRACTING" ? "animate-spin" : ""}`} />
+                        <span>{extractionStatus === "EXTRACTING" ? "Extracting..." : "Extract Frame →"}</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* Section 1.5: FRAME EXTRACTION */}
+            <section className="bg-white border border-slate-200 rounded-xl overflow-hidden" id="section-extract">
+              <div className="border-b border-slate-200/60 bg-white px-5 py-3.5 flex items-center justify-between">
+                <div className="flex items-center space-x-2.5">
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-50 border border-blue-100 text-blue-600 text-[11px] font-bold">1.5</span>
+                  <h3 className="font-black text-slate-400 tracking-widest text-[10px] uppercase">Stage 2: Frame Extraction</h3>
+                </div>
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider ${
+                  extractionStatus === "SUCCESS" || job.status === "EXTRACTED"
+                    ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                    : extractionStatus === "EXTRACTING"
+                    ? "bg-amber-50 text-amber-700 border border-amber-200 animate-pulse"
+                    : extractionStatus === "FAILED" || (job.status === "FAILED" && job.failedStage === "Extract")
+                    ? "bg-rose-50 text-rose-700 border border-rose-200"
+                    : "bg-slate-50 text-slate-500 border border-slate-200"
+                }`}>
+                  {extractionStatus === "SUCCESS" || job.status === "EXTRACTED" ? "SUCCESS" : extractionStatus}
+                </span>
+              </div>
+
+              <div className="p-5 space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* Left Column: Flow & Details */}
+                  <div className="space-y-4 flex flex-col justify-between">
+                    <div className="space-y-3">
+                      <div>
+                        <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Extraction Pipeline Flow</span>
+                        <div className="flex items-center space-x-2.5 bg-slate-50 border border-slate-200/60 p-3 rounded-lg text-xs font-mono text-slate-600">
+                          <span className="font-bold text-slate-800">SOURCE ({job.sourceType.toUpperCase()})</span>
+                          <ChevronRight className="h-4 w-4 text-slate-400" />
+                          <span className="font-bold text-blue-600">EXTRACTED FRAME</span>
+                        </div>
+                      </div>
+
+                      <div>
+                        <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Source Filename</span>
+                        <p className="text-slate-800 font-mono text-xs bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200/80 inline-block break-all">
+                          {selectedFile ? selectedFile.name : job.sourceFilename}
+                        </p>
+                      </div>
+
+                      <div>
+                        <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Extraction Status Details</span>
+                        <p className="text-xs text-slate-600 leading-relaxed">
+                          {extractionStatus === "SUCCESS" || job.status === "EXTRACTED" ? (
+                            "Representative keyframe successfully extracted and verified. Ready for characters parsing (OCR)."
+                          ) : extractionStatus === "EXTRACTING" ? (
+                            "Processing stream using browser File and Canvas APIs. Seeking to first usable frame..."
+                          ) : extractionStatus === "FAILED" || (job.status === "FAILED" && job.failedStage === "Extract") ? (
+                            <span className="text-rose-600 font-bold">
+                              Error: {extractionError || job.errorMessage || "Failed to extract keyframe."}
+                            </span>
+                          ) : (
+                            "Idle. Initiate extraction from the panel above or step simulator."
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Right Column: Visual Verification */}
+                  <div>
+                    <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Extracted Frame Preview</span>
+                    <div className="relative aspect-video rounded-xl bg-slate-950 overflow-hidden border border-slate-200 shadow-inner flex items-center justify-center">
+                      {extractedFrameUrl || (job.status === "EXTRACTED" && job.sourceUrl) ? (
+                        <img 
+                          src={extractedFrameUrl || job.sourceUrl} 
+                          alt="Extracted frame preview" 
+                          className="w-full h-full object-contain"
+                          referrerPolicy="no-referrer"
+                        />
+                      ) : (
+                        <div className="text-center p-4">
+                          <div className="inline-flex items-center justify-center h-10 w-10 rounded-full bg-slate-800 text-slate-500 mb-2">
+                            <Video className="h-5 w-5" />
+                          </div>
+                          <p className="text-slate-400 font-bold text-xs tracking-wider">No Extracted Frame Yet</p>
+                          <p className="text-slate-500 text-[10px] mt-1">Extract the keyframe first before visually verifying.</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {extractedFrameUrl && (extractionStatus === "SUCCESS" || job.status === "EXTRACTED" || job.status === "OCR_READY") && (
+                  <div className="mt-6 pt-5 border-t border-slate-100">
+                    <div className="bg-emerald-50/45 border border-emerald-100 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                      <div>
+                        <div className="flex items-center gap-1.5 mb-1">
+                          <span className="inline-flex h-2 w-2 rounded-full bg-emerald-600 animate-pulse"></span>
+                          <span className="text-[10px] font-black text-emerald-800 uppercase tracking-widest">Next Step Recommendation</span>
+                        </div>
+                        <p className="text-xs text-slate-700 font-semibold leading-relaxed">
+                          Keyframe successfully verified in Stage 1.5. Proceed to Stage 2 (OCR) and click Run OCR to parse characters from this image.
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => {
+                          document.getElementById("section-ocr")?.scrollIntoView({ behavior: "smooth" });
+                        }}
+                        className="shrink-0 inline-flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white font-black px-4.5 py-2.5 rounded-lg text-[10px] uppercase tracking-widest transition cursor-pointer shadow-xs whitespace-nowrap"
+                      >
+                        <FileText className="h-3.5 w-3.5 shrink-0" />
+                        <span>Go to OCR Stage →</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </section>
 
             {/* Section 2: OCR */}
-            <section className="bg-white border border-slate-200 rounded-xl overflow-hidden" id="section-ocr">
+            <section className="scroll-mt-24 bg-white border border-slate-200 rounded-xl overflow-hidden" id="section-ocr">
               <div className="border-b border-slate-200/60 bg-white px-5 py-3.5 flex items-center justify-between">
                 <div className="flex items-center space-x-2.5">
                   <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-50 border border-blue-100 text-blue-600 text-[11px] font-bold">2</span>
                   <h3 className="font-black text-slate-400 tracking-widest text-[10px] uppercase">OCR (OPTICAL CHARACTER RECOGNITION)</h3>
                 </div>
-                <span className="text-[10px] bg-slate-50 text-slate-500 px-2 py-0.5 rounded border border-slate-200/60 font-bold uppercase tracking-wider">PaddleOCR V1</span>
+                <span className="text-[10px] bg-slate-50 text-slate-500 px-2 py-0.5 rounded border border-slate-200/60 font-bold uppercase tracking-wider">Google Cloud Vision OCR</span>
               </div>
 
               <div className="p-5 space-y-6">
+                {/* Unified Production OCR Engine Panel */}
+                <div className="bg-slate-50/60 rounded-xl p-4 border border-slate-200/80">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
+                    <div>
+                      <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+                        <Activity className="h-4 w-4 text-blue-600" />
+                        Production OCR Engine
+                      </h4>
+                      <p className="text-[10px] text-slate-500 mt-0.5">
+                        Powered by Google Cloud Vision neural networks. High-precision document text detection with native Thai language hint.
+                      </p>
+                    </div>
+
+                    <div className="shrink-0">
+                      {isVisionConfigured === null ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider bg-slate-100 text-slate-500 animate-pulse">
+                          <span className="h-1.5 w-1.5 rounded-full bg-slate-400"></span>
+                          Checking Credentials
+                        </span>
+                      ) : isVisionConfigured ? (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider bg-emerald-50 text-emerald-700 border border-emerald-200/60">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-600 animate-pulse"></span>
+                          Configured & Ready
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider bg-rose-50 text-rose-700 border border-rose-200/60">
+                          <span className="h-1.5 w-1.5 rounded-full bg-rose-600"></span>
+                          Credentials Missing
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {isVisionConfigured === false && (
+                    <div className="mt-2.5 bg-rose-50 border border-rose-100/60 rounded-lg p-2.5 text-[10px] text-rose-800 font-semibold leading-normal">
+                      Google Cloud Vision API key is missing. Please add <strong>GOOGLE_CLOUD_VISION_API_KEY</strong> to your AI Studio secrets to enable real character recognition.
+                    </div>
+                  )}
+                </div>
+
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   
                   {/* Field A: RAW OCR */}
@@ -564,7 +1659,7 @@ export default function App() {
                         value={job.rawOcr}
                         readOnly
                         rows={5}
-                        className="w-full h-full min-h-[140px] p-3 bg-slate-50 text-slate-400 font-mono text-xs rounded-lg border border-slate-200 cursor-not-allowed resize-none focus:outline-hidden"
+                        className="w-full h-full min-h-[140px] p-3 bg-slate-50 text-slate-800 font-mono text-xs rounded-lg border border-slate-200 cursor-not-allowed resize-none focus:outline-hidden font-bold"
                         id="textarea-raw-ocr"
                         title="Raw OCR text extracted from frame analysis. This is immutable to preserve historical source accuracy."
                       />
@@ -601,37 +1696,244 @@ export default function App() {
                   </div>
 
                 </div>
+
+                {/* Build 4 Run OCR Action Button */}
+                {selectedFile && extractedFrameUrl && (job.status === "EXTRACTED" || job.status === "FAILED") && (
+                  <div className="mt-6 pt-5 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <span className="inline-flex h-2 w-2 rounded-full bg-blue-600 animate-pulse"></span>
+                        <span className="text-[10px] font-black text-blue-800 uppercase tracking-widest">Next Step Recommendation</span>
+                      </div>
+                      <p className="text-xs text-slate-600 leading-relaxed font-semibold">
+                        Review the extracted keyframe from Stage 1.5. Click below to trigger managed cloud character recognition.
+                      </p>
+                    </div>
+                    <button
+                      onClick={handleRunOcr}
+                      disabled={ocrStatus === "PROCESSING" || isVisionConfigured === false}
+                      className="shrink-0 inline-flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white font-black px-4.5 py-2.5 rounded-lg text-[10px] uppercase tracking-widest transition cursor-pointer shadow-xs whitespace-nowrap"
+                      id="btn-run-ocr-action"
+                    >
+                      <FileText className={`h-3.5 w-3.5 shrink-0 ${ocrStatus === "PROCESSING" ? "animate-spin" : ""}`} />
+                      <span>
+                        {ocrStatus === "PROCESSING"
+                          ? "Processing OCR..."
+                          : isVisionConfigured === false
+                          ? "Vision Key Required"
+                          : "Run Google Vision OCR"}
+                      </span>
+                    </button>
+                  </div>
+                )}
+
+                {ocrStatus === "PROCESSING" && (
+                  <div className="mt-4 pt-4 border-t border-slate-100">
+                    <div className="bg-blue-50/50 border border-blue-100 rounded-lg p-3.5 flex items-center gap-2.5 animate-pulse">
+                      <FileText className="h-5 w-5 text-blue-600 shrink-0 animate-spin" />
+                      <p className="text-xs text-blue-950 font-semibold">
+                        Sending base64 pixels to secure server-side proxy... Executing Google Cloud Vision API (DOCUMENT_TEXT_DETECTION with Thai hint)...
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {ocrStatus === "FAILED" && (
+                  <div className="mt-4 pt-4 border-t border-slate-100">
+                    <div className="bg-rose-50 border border-rose-100 rounded-lg p-3.5 flex items-center gap-2.5">
+                      <XCircle className="h-5 w-5 text-rose-600 shrink-0" />
+                      <p className="text-xs text-rose-950 font-semibold">
+                        OCR Engine failed (using Google Cloud Vision): <span className="font-bold">{ocrError || job.errorMessage}</span>
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {ocrStatus === "SUCCESS" && job.status === "OCR_READY" && (
+                  <div className="mt-4 pt-4 border-t border-slate-100">
+                    <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-3.5 flex items-center gap-2.5">
+                      <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
+                      <p className="text-xs text-emerald-950 font-semibold">
+                        Real Thai OCR completed successfully using <span className="font-bold">Google Cloud Vision</span>! Machine extraction evidence loaded into Raw OCR.
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
             </section>
 
-            {/* Section 3: CORE MEANING */}
+            {/* Section 3: CORE MEANING & TEXT PROCESSING */}
             <section className="bg-white border border-slate-200 rounded-xl overflow-hidden" id="section-core-meaning">
-              <div className="border-b border-slate-200/60 bg-white px-5 py-3.5 flex items-center">
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-50 border border-blue-100 text-blue-600 text-[11px] font-bold mr-2.5">3</span>
-                <h3 className="font-black text-slate-400 tracking-widest text-[10px] uppercase">CORE MEANING</h3>
+              <div className="border-b border-slate-200/60 bg-white px-5 py-3.5 flex items-center justify-between">
+                <div className="flex items-center">
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-50 border border-blue-100 text-blue-600 text-[11px] font-bold mr-2.5">3</span>
+                  <h3 className="font-black text-slate-400 tracking-widest text-[10px] uppercase">TEXT PROCESSING & CORE MEANING</h3>
+                </div>
+                <span className="text-[10px] bg-slate-50 text-slate-500 px-2 py-0.5 rounded border border-slate-200/60 font-bold uppercase tracking-wider">Gemma 4 26B A4B</span>
               </div>
 
-              <div className="p-5">
-                <div className="flex flex-col space-y-2">
-                  <div className="flex justify-between items-center">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                      Central Message Synthesis
-                    </label>
-                    <span className="text-[10px] text-slate-400 tracking-wide">Guides script-variant generators</span>
+              <div className="p-5 space-y-6">
+                {/* R&D Auto Accept Config Toggle */}
+                <div className="flex items-center justify-between p-3.5 bg-slate-50 border border-slate-200/60 rounded-xl">
+                  <div>
+                    <span className="text-[11px] font-black text-slate-700 block uppercase tracking-wider">AI Auto-Accept Mode</span>
+                    <span className="text-[9px] text-slate-400 block mt-0.5">When enabled, validated Gemma outputs automatically commit to clean text & core meaning fields.</span>
                   </div>
+                  <button
+                    onClick={() => setAutoAcceptAiText(!autoAcceptAiText)}
+                    className={`relative inline-flex h-5.5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${autoAcceptAiText ? "bg-blue-600" : "bg-slate-300"}`}
+                    type="button"
+                    role="switch"
+                    id="toggle-auto-accept-ai"
+                    aria-label="AI Auto-Accept Mode toggle"
+                  >
+                    <span className={`pointer-events-none inline-block h-4.5 w-4.5 transform rounded-full bg-white shadow transition duration-200 ease-in-out ${autoAcceptAiText ? "translate-x-4.5" : "translate-x-0"}`} />
+                  </button>
+                </div>
 
-                  <textarea
-                    value={job.coreMeaning}
-                    onChange={handleCoreMeaningChange}
-                    rows={2.5}
-                    className="w-full p-3 bg-white text-slate-800 text-xs rounded-lg border border-slate-200 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition duration-150"
-                    id="textarea-core-meaning"
-                    placeholder="Enter the central core message or quote summary..."
-                  />
-                  
-                  <div className="pt-1.5 flex items-center space-x-2 text-[10px] text-slate-500">
-                    <Info className="h-3.5 w-3.5 text-blue-500 shrink-0" />
-                    <span>The Core Meaning acts as a semantic bridge, stripping out conversational filler to target the raw motivational core.</span>
+                {/* Main Action Button */}
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 p-4 border border-blue-100 bg-blue-50/20 rounded-xl">
+                  <div>
+                    <span className="text-[10px] font-black text-blue-800 uppercase tracking-widest block mb-1">Gemma Processing Pipeline</span>
+                    <p className="text-xs text-slate-600 font-semibold leading-relaxed">
+                      Send raw character evidence to Gemma to normalize spacing, repair artifacts, and synthesize core semantic meaning.
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleRunTextProcessing}
+                    disabled={textProcessingStatus === "PROCESSING" || !job.rawOcr}
+                    className="shrink-0 inline-flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-black px-4.5 py-2.5 rounded-lg text-[10px] uppercase tracking-widest transition cursor-pointer shadow-xs whitespace-nowrap"
+                    id="btn-run-text-processing"
+                  >
+                    <Sparkles className={`h-3.5 w-3.5 shrink-0 ${textProcessingStatus === "PROCESSING" ? "animate-spin" : ""}`} />
+                    <span>
+                      {textProcessingStatus === "PROCESSING"
+                        ? "AI Processing..."
+                        : !job.rawOcr
+                        ? "Ocr Text Required"
+                        : "Run Gemma Processing"}
+                    </span>
+                  </button>
+                </div>
+
+                {/* Processing State Loader */}
+                {textProcessingStatus === "PROCESSING" && (
+                  <div className="bg-blue-50/50 border border-blue-100 rounded-lg p-3.5 flex items-center gap-2.5 animate-pulse">
+                    <Sparkles className="h-5 w-5 text-blue-600 shrink-0 animate-spin" />
+                    <p className="text-xs text-blue-950 font-semibold">
+                      Invoking Gemma 4 26B A4B model... Normalizing raw characters and extracting core motivational essence...
+                    </p>
+                  </div>
+                )}
+
+                {/* Error Banner */}
+                {textProcessingStatus === "FAILED" && (
+                  <div className="bg-rose-50 border border-rose-100 rounded-lg p-3.5 flex items-center gap-2.5">
+                    <XCircle className="h-5 w-5 text-rose-600 shrink-0" />
+                    <p className="text-xs text-rose-950 font-semibold">
+                      Text Processing Failed: <span className="font-bold">{textProcessingError || job.errorMessage}</span>
+                    </p>
+                  </div>
+                )}
+
+                {/* Success/Accept Status Banners */}
+                {textProcessingStatus === "SUCCESS" && autoAcceptAiText && (
+                  <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-3.5 flex items-center gap-2.5">
+                    <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0" />
+                    <div>
+                      <p className="text-xs text-emerald-950 font-bold">Gemma processing succeeded & auto-accepted!</p>
+                      {aiCandidate?.provenance && (
+                        <p className="text-[10px] text-emerald-800 mt-0.5">
+                          Latency: {aiCandidate.provenance.latency_ms} ms | Language: {aiCandidate.language} | Tokens: P:{aiCandidate.provenance.input_tokens || "N/A"} C:{aiCandidate.provenance.output_tokens || "N/A"}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* AI Candidate Section (When review is needed) */}
+                {!autoAcceptAiText && aiCandidate && (
+                  <div className="border border-dashed border-blue-300 bg-blue-50/10 rounded-xl p-4.5 space-y-4" id="ai-candidate-card">
+                    <div className="flex justify-between items-center pb-2 border-b border-blue-100/60">
+                      <div>
+                        <span className="text-[10px] font-black text-blue-700 block uppercase tracking-wider">Gemma AI Candidate</span>
+                        <span className="text-[9px] text-slate-400 block mt-0.5">Awaiting manual operator verification and acceptance.</span>
+                      </div>
+                      <span className="text-[9px] text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 font-bold uppercase tracking-wider">
+                        Language: {aiCandidate.language.toUpperCase()}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="flex flex-col">
+                        <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">AI Clean Text Candidate</span>
+                        <textarea
+                          value={aiCandidate.cleanText}
+                          readOnly
+                          rows={4}
+                          className="w-full p-2.5 bg-slate-50 text-slate-800 text-xs rounded-lg border border-slate-200 focus:outline-hidden font-medium cursor-default resize-none"
+                        />
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">AI Core Meaning Candidate</span>
+                        <textarea
+                          value={aiCandidate.coreMeaning}
+                          readOnly
+                          rows={4}
+                          className="w-full p-2.5 bg-slate-50 text-slate-800 text-xs rounded-lg border border-slate-200 focus:outline-hidden font-medium cursor-default resize-none"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Metadata & Accept button */}
+                    <div className="pt-2 border-t border-blue-100/60 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                      {aiCandidate.provenance && (
+                        <div className="text-[9px] text-slate-500 space-y-0.5">
+                          <div>
+                            <strong>Provenance:</strong> {aiCandidate.provenance.provider} ({aiCandidate.provenance.model})
+                          </div>
+                          <div>
+                            <strong>Metrics:</strong> Latency: {aiCandidate.provenance.latency_ms} ms | Tokens: Input {aiCandidate.provenance.input_tokens || "N/A"}, Output {aiCandidate.provenance.output_tokens || "N/A"}, Total {aiCandidate.provenance.total_tokens || "N/A"}
+                          </div>
+                        </div>
+                      )}
+                      <button
+                        onClick={handleAcceptAiText}
+                        className="shrink-0 inline-flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-black px-4 py-2 rounded-lg text-[10px] uppercase tracking-widest transition cursor-pointer"
+                        id="btn-accept-ai-text"
+                      >
+                        <Check className="h-3.5 w-3.5 shrink-0" />
+                        <span>Accept AI Text</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Canonical Text Editor Fields */}
+                <div className="flex flex-col space-y-4 pt-4 border-t border-slate-100">
+                  <div className="flex flex-col space-y-2">
+                    <div className="flex justify-between items-center">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                        Production Core Meaning <span className="text-blue-600 font-bold lowercase italic">(editable)</span>
+                      </label>
+                      <span className="text-[9px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100 font-bold uppercase tracking-wider">
+                        Production Input
+                      </span>
+                    </div>
+
+                    <textarea
+                      value={job.coreMeaning}
+                      onChange={handleCoreMeaningChange}
+                      rows={2.5}
+                      className="w-full p-3 bg-white text-slate-800 text-xs rounded-lg border border-slate-200 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition duration-150"
+                      id="textarea-core-meaning"
+                      placeholder="Enter the central core message or quote summary..."
+                    />
+                    
+                    <div className="pt-1.5 flex items-center space-x-2 text-[10px] text-slate-500">
+                      <Info className="h-3.5 w-3.5 text-blue-500 shrink-0" />
+                      <span>The Core Meaning acts as a semantic bridge, stripping out conversational filler to target the raw motivational core.</span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1308,7 +2610,7 @@ export default function App() {
                     <p>The code is prepared for quick SDK integrations. In Build 1, mock service models have been established at:</p>
                     <p className="font-mono text-slate-500 bg-white border border-slate-200/60 p-1 rounded text-[9px] truncate">src/services/pipeline.ts</p>
                     <ul className="list-disc pl-4 space-y-1 text-slate-400 text-[10px]">
-                      <li>PaddleOCR, FFmpeg execution omitted.</li>
+                      <li>Google Cloud Vision OCR integrated, FFmpeg execution.</li>
                       <li>OmniVoice, Gemini API mocks ready.</li>
                     </ul>
                   </div>
@@ -1336,7 +2638,7 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-1.5">
                     <span className="h-1.5 w-1.5 rounded-full bg-slate-300"></span>
-                    <span><strong>2. PaddleOCR:</strong> Extract characters directly.</span>
+                    <span><strong>2. Google Cloud Vision OCR:</strong> Extract characters directly.</span>
                   </div>
                   <div className="flex items-center gap-1.5">
                     <span className="h-1.5 w-1.5 rounded-full bg-slate-300"></span>

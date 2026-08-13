@@ -1,0 +1,269 @@
+import express from "express";
+import path from "path";
+import { createServer as createViteServer } from "vite";
+import { GoogleGenAI } from "@google/genai";
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  // Set up standard JSON parser with a generous size limit for base64 frames
+  app.use(express.json({ limit: "50mb" }));
+
+  // Endpoint to check configuration status
+  app.get("/api/config-status", (req, res) => {
+    const isConfigured = !!process.env.GOOGLE_CLOUD_VISION_API_KEY;
+    res.json({ configured: isConfigured });
+  });
+
+  // Main Google Cloud Vision OCR proxy endpoint
+  app.post("/api/ocr-vision", async (req, res) => {
+    try {
+      const apiKey = process.env.GOOGLE_CLOUD_VISION_API_KEY;
+      if (!apiKey) {
+        return res.status(503).json({
+          error: "NOT_CONFIGURED",
+          message: "Google Cloud Vision API Key is not configured in environment variables."
+        });
+      }
+
+      const { imageBase64 } = req.body;
+      if (!imageBase64) {
+        return res.status(400).json({ error: "Missing imageBase64 data." });
+      }
+
+      // Strip any standard base64 data url scheme (e.g. data:image/png;base64,)
+      const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z+.-]+;base64,/, "");
+
+      // Call Google Cloud Vision Annotate API
+      const visionUrl = `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`;
+      const payload = {
+        requests: [
+          {
+            image: {
+              content: cleanBase64
+            },
+            features: [
+              {
+                type: "DOCUMENT_TEXT_DETECTION"
+              }
+            ],
+            imageContext: {
+              languageHints: ["th"]
+            }
+          }
+        ]
+      };
+
+      const response = await fetch(visionUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        return res.status(response.status).json({
+          error: `Google API Error (${response.status})`,
+          message: errorText
+        });
+      }
+
+      const data = await response.json();
+      
+      const responseAnnotation = data.responses?.[0];
+      if (responseAnnotation?.error) {
+        return res.status(400).json({
+          error: "Google Vision API Error",
+          message: responseAnnotation.error.message
+        });
+      }
+
+      // Extract raw full text detection
+      const textAnnotations = responseAnnotation?.textAnnotations;
+      const rawText = textAnnotations?.[0]?.description || "";
+
+      res.json({ text: rawText });
+    } catch (err: any) {
+      console.error("[Vision API Proxy Error]", err);
+      res.status(500).json({
+        error: "Internal Server Error",
+        message: err.message || "Unknown error occurred on the proxy server."
+      });
+    }
+  });
+
+  // Main Google Gemini Text Processing endpoint using Gemma 4 26B
+  app.post("/api/text-process", async (req, res) => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.status(503).json({
+          error: "NOT_CONFIGURED",
+          message: "GEMINI_API_KEY is not configured in environment variables."
+        });
+      }
+
+      const { rawOcrText } = req.body;
+      if (!rawOcrText || typeof rawOcrText !== "string" || rawOcrText.trim() === "") {
+        return res.status(400).json({
+          error: "Bad Request",
+          message: "Missing or empty rawOcrText parameter in request body."
+        });
+      }
+
+      const startTime = Date.now();
+      const ai = new GoogleGenAI({ apiKey });
+
+      const prompt = `You are an elite automated text processing service in a video production pipeline.
+Analyze the following raw OCR text (which is machine evidence and may contain artifacts, bad spacing, or formatting noise):
+"${rawOcrText}"
+
+Perform these operations:
+1. Normalise spacing, repair OCR errors/artifacts, and improve line breaks and punctuation. Preserve Thai meaning and do not creatively rewrite or invent any information. Save this as 'clean_text'.
+2. Synthesize a concise, accurate semantic interpretation of the central meaning, preserving the original intent. Do not invent any attribution or unsupported facts. Save this as 'core_meaning'.
+3. Identify the language code of the text (e.g., 'th', 'en'). Save this as 'language'.
+
+You MUST return a valid JSON object matching this schema EXACTLY:
+{
+  "clean_text": "corrected string",
+  "core_meaning": "concise interpretation",
+  "language": "language code"
+}
+
+Do NOT include any markdown code fences, preambles, explanation prose, or analysis. Return ONLY the raw JSON.`;
+
+      let textResponse = "";
+      let usageMetadata: any = null;
+
+      try {
+        const aiRes = await ai.models.generateContent({
+          model: "gemma-4-26b-a4b-it",
+          contents: prompt,
+          config: {
+            responseMimeType: "application/json",
+            temperature: 0.1
+          }
+        });
+        textResponse = aiRes.text || "";
+        usageMetadata = aiRes.usageMetadata;
+      } catch (firstErr: any) {
+        console.warn("[Gemma Structured Call Warning] Retrying without strict json mime-type...", firstErr);
+        // Fallback retry without strict application/json configuration to avoid parameter incompatibility
+        const aiResFallback = await ai.models.generateContent({
+          model: "gemma-4-26b-a4b-it",
+          contents: prompt,
+          config: {
+            temperature: 0.1
+          }
+        });
+        textResponse = aiResFallback.text || "";
+        usageMetadata = aiResFallback.usageMetadata;
+      }
+
+      let cleanedText = textResponse.trim();
+      if (cleanedText.startsWith("```")) {
+        cleanedText = cleanedText.replace(/^```(json)?\s*/i, "");
+        cleanedText = cleanedText.replace(/\s*```$/, "");
+      }
+      cleanedText = cleanedText.trim();
+
+      let parsed: any;
+      try {
+        parsed = JSON.parse(cleanedText);
+      } catch (parseErr: any) {
+        console.error("[JSON Parse Failure]", cleanedText, parseErr);
+        return res.status(422).json({
+          error: "MALFORMED_OUTPUT",
+          message: "The model did not return a parseable JSON object.",
+          rawOutput: textResponse
+        });
+      }
+
+      const clean_text = parsed.clean_text || parsed.cleanText;
+      const core_meaning = parsed.core_meaning || parsed.coreMeaning;
+      const language = parsed.language;
+
+      if (!clean_text || typeof clean_text !== "string" || clean_text.trim() === "" ||
+          !core_meaning || typeof core_meaning !== "string" || core_meaning.trim() === "" ||
+          !language || typeof language !== "string" || language.trim() === "") {
+        return res.status(422).json({
+          error: "INVALID_STRUCTURE",
+          message: "Model output is missing required fields: 'clean_text', 'core_meaning', or 'language'.",
+          parsed
+        });
+      }
+
+      const latency_ms = Date.now() - startTime;
+      const input_tokens = usageMetadata?.promptTokenCount || null;
+      const output_tokens = usageMetadata?.candidatesTokenCount || null;
+      const total_tokens = usageMetadata?.totalTokenCount || null;
+
+      res.json({
+        clean_text: clean_text.trim(),
+        core_meaning: core_meaning.trim(),
+        language: language.trim().toLowerCase(),
+        provenance: {
+          provider: "google-gemini-api",
+          model: "gemma-4-26b-a4b-it",
+          live_model_used: "gemma-4-26b-a4b-it",
+          processed_at: new Date().toISOString(),
+          latency_ms,
+          input_tokens,
+          output_tokens,
+          total_tokens
+        }
+      });
+    } catch (err: any) {
+      console.error("[Text Process Error]", err);
+      res.status(500).json({
+        error: "Internal Server Error",
+        message: err.message || "An unexpected error occurred during text processing.",
+        status: 500
+      });
+    }
+  });
+
+  // Catch JSON syntax errors from body parser before they propagate to static fallback
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err instanceof SyntaxError && "status" in err && err.status === 400 && "body" in err) {
+      console.error("[Body Parser JSON Error]", err);
+      return res.status(400).json({
+        error: "Invalid JSON",
+        message: "The request body could not be parsed as valid JSON."
+      });
+    }
+    next(err);
+  });
+
+  // Strict fallback for any unhandled /api/* endpoints to prevent returning the SPA HTML file
+  app.all("/api/*", (req, res) => {
+    res.status(404).json({
+      error: "Not Found",
+      message: `API endpoint ${req.method} ${req.path} is not registered.`
+    });
+  });
+
+  // Mount Vite development middleware in non-production environments
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+startServer();
