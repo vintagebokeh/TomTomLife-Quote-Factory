@@ -6,6 +6,7 @@ export const initialMockJob: QuoteJob = {
   sourceFilename: "tom_wisdom_keynote_clip_02.mp4",
   sourceType: "video",
   sourceUrl: "https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&q=80&w=1080", // Using a professional presentation video placeholder image
+  sourceSha256: null,
   rawOcr: "the biggest risk is not taking any risk... in a world that is changing really quickly, the only strategy that is guaranteed to fail is not taking risks. it's not about being reckless, but about making smart bets and moving fast.",
   cleanText: "The biggest risk is not taking any risk. In a world that is changing really quickly, the only strategy that is guaranteed to fail is not taking risks. It's not about being reckless, but about making smart bets and moving fast.",
   coreMeaning: "True security comes from embracing calculated risks in a fast-evolving world; standing still is the only guaranteed way to fail.",

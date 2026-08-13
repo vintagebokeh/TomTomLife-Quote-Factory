@@ -703,32 +703,49 @@ export default function App() {
     }
   };
 
-  const processSelectedFile = async (file: File) => {
-    // 1. Validate file extension or mime type
+  const describeSourceFile = (file: File): { sourceType: "image" | "video"; mimeType: string } | null => {
     const isImage = file.type.startsWith("image/") || /\.(jpg|jpeg|png|webp)$/i.test(file.name);
     const isVideo = file.type.startsWith("video/") || /\.(mp4|mov|webm)$/i.test(file.name);
+    if (!isImage && !isVideo) return null;
+    return { sourceType: isImage ? "image" : "video", mimeType: file.type || (isImage ? "image/jpeg" : "video/mp4") };
+  };
 
-    if (!isImage && !isVideo) {
+  const calculateSourceSha256 = async (file: File): Promise<string> => {
+    const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  };
+
+  const uploadSourceArtifact = async (file: File, mimeType: string): Promise<string> => {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Unable to read the selected source file."));
+      reader.onload = () => resolve(String(reader.result));
+      reader.readAsDataURL(file);
+    });
+    const response = await fetch("/api/source-artifacts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fileName: file.name, mimeType, dataBase64: dataUrl.split(",", 2)[1] })
+    });
+    const data = await response.json();
+    if (!response.ok || !data.sourceRef) throw new Error(data.message || "Server did not return a durable visual source reference.");
+    return data.sourceRef;
+  };
+
+  const processSelectedFile = async (file: File) => {
+    // New source selection remains a semantic intake event and keeps its existing invalidation behavior.
+    const descriptor = describeSourceFile(file);
+
+    if (!descriptor) {
       notify("Unsupported file type! Please select an image (.jpg, .jpeg, .png, .webp) or video (.mp4, .mov, .webm).", "error");
       return;
     }
 
     let sourceRef: string;
+    let sourceSha256: string;
     try {
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onerror = () => reject(new Error("Unable to read the selected source file."));
-        reader.onload = () => resolve(String(reader.result));
-        reader.readAsDataURL(file);
-      });
-      const response = await fetch("/api/source-artifacts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileName: file.name, mimeType: file.type, dataBase64: dataUrl.split(",", 2)[1] })
-      });
-      const data = await response.json();
-      if (!response.ok || !data.sourceRef) throw new Error(data.message || "Server did not return a durable visual source reference.");
-      sourceRef = data.sourceRef;
+      sourceSha256 = await calculateSourceSha256(file);
+      sourceRef = await uploadSourceArtifact(file, descriptor.mimeType);
     } catch (err: any) {
       notify(`Source artifact upload failed: ${err.message || "unknown error"}`, "error");
       return;
@@ -747,13 +764,14 @@ export default function App() {
     setTextProcessingError(null);
     setAiCandidate(null);
 
-    const detectedType = isImage ? "image" : "video";
+    const detectedType = descriptor.sourceType;
 
     // 3. Update the job metadata
     const updatedJob: QuoteJob = invalidateVideo({
       ...job,
       sourceFilename: file.name,
       sourceType: detectedType,
+      sourceSha256,
       status: "NEW", // Reset status to NEW for frame extraction
       sourceUrl: sourceRef,
       stage6VisualRef: sourceRef,
@@ -772,6 +790,48 @@ export default function App() {
     // 4. Save metadata to Supabase (Build 2 spec)
     if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
       await saveJobToDb(updatedJob);
+    }
+  };
+
+  const handleBackfillDurableSource = async (file: File) => {
+    const currentJob = jobRef.current;
+    const descriptor = describeSourceFile(file);
+    if (!descriptor) {
+      notify("Backfill requires the original supported image or video file.", "error");
+      return;
+    }
+    if (file.name !== currentJob.sourceFilename) {
+      notify("Backfill rejected: selected filename does not match the canonical source filename.", "error");
+      return;
+    }
+    if (descriptor.sourceType !== currentJob.sourceType) {
+      notify("Backfill rejected: selected media type does not match the canonical source type.", "error");
+      return;
+    }
+    if (!supabaseService.isConfigured() || dbStatus !== "CONNECTED") {
+      notify("Backfill requires an active Supabase connection so the durable source reference can be persisted.", "error");
+      return;
+    }
+
+    try {
+      const sourceSha256 = await calculateSourceSha256(file);
+      if (currentJob.sourceSha256 && currentJob.sourceSha256 !== sourceSha256) {
+        throw new Error("Selected file hash does not match the established canonical source identity.");
+      }
+      const sourceRef = await uploadSourceArtifact(file, descriptor.mimeType);
+      const backfilledJob: QuoteJob = {
+        ...currentJob,
+        sourceSha256,
+        stage6VisualRef: sourceRef
+      };
+      // Persist before local state changes: a failed write cannot alter the verified pipeline in the browser.
+      await supabaseService.saveJob(backfilledJob);
+      setJob(backfilledJob);
+      setDbStatus("CONNECTED");
+      setDbErrorMessage(null);
+      notify("Durable source attached. OCR, text, scripts, voices, and workflow were preserved.", "success");
+    } catch (err: any) {
+      notify(`Durable source backfill failed: ${err.message || "unknown error"}`, "error");
     }
   };
 
@@ -3286,6 +3346,40 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                               {job.videoStatus === "READY" && job.videoUrlOrRef ? `Size: ${job.videoFileSizeBytes ?? "unknown"} bytes — ${job.videoWidth ?? "?"}x${job.videoHeight ?? "?"} — ${job.videoDurationMs ?? "?"} ms` : "No verified provider output"}
                             </p>
                           </div>
+                        </div>
+                      </div>
+
+                      <div className="bg-blue-50/50 border border-blue-100 p-3 rounded-xl">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <span className="text-[9px] font-black text-blue-700 uppercase tracking-widest block">Durable Stage 6 Source</span>
+                            <p className="text-[10px] text-slate-600 mt-1">
+                              {job.stage6VisualRef ? `READY: ${job.stage6VisualRef}` : "Attach the original source file only. This does not replace intake or rerun OCR, scripts, or voices."}
+                            </p>
+                          </div>
+                          {!job.stage6VisualRef && (
+                            <>
+                              <input
+                                id="durable-source-backfill-input"
+                                type="file"
+                                className="hidden"
+                                accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.webm"
+                                onChange={(event) => {
+                                  const file = event.target.files?.[0];
+                                  event.target.value = "";
+                                  if (file) void handleBackfillDurableSource(file);
+                                }}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => document.getElementById("durable-source-backfill-input")?.click()}
+                                className="shrink-0 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black uppercase tracking-wider transition"
+                                id="btn-backfill-durable-source"
+                              >
+                                Attach Durable Source
+                              </button>
+                            </>
+                          )}
                         </div>
                       </div>
                     </div>

@@ -36,6 +36,7 @@ export interface QuoteJob {
   sourceFilename: string;
   sourceType: "image" | "video";
   sourceUrl: string;
+  sourceSha256?: string | null;
   // Server-owned visual reference required by Stage 6; browser blob URLs are preview-only.
   stage6VisualRef?: string | null;
   rawOcr: string;

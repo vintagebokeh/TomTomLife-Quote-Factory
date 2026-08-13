@@ -14,6 +14,7 @@ export interface QuoteJobRow {
   content_id: string;
   source_filename: string;
   source_type: string;
+  source_sha256?: string | null;
   raw_ocr_text: string;
   clean_text: string;
   core_meaning: string;
@@ -96,6 +97,7 @@ export function mapRowToJob(row: QuoteJobRow): QuoteJob {
     sourceFilename: row.source_filename,
     sourceType: row.source_type as "image" | "video",
     sourceUrl: "https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&q=80&w=1080",
+    sourceSha256: row.source_sha256 || null,
     stage6VisualRef: row.stage6_visual_ref || null,
     rawOcr: row.raw_ocr_text,
     cleanText: row.clean_text,
@@ -185,6 +187,7 @@ export function mapJobToRow(job: QuoteJob): QuoteJobRow {
     content_id: job.contentId,
     source_filename: job.sourceFilename,
     source_type: job.sourceType,
+    source_sha256: job.sourceSha256 || null,
     raw_ocr_text: job.rawOcr,
     clean_text: job.cleanText,
     core_meaning: job.coreMeaning,
