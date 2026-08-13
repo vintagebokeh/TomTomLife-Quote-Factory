@@ -17,7 +17,7 @@ export type JobStatus =
 export interface VoiceSlot {
   voiceId: string;
   name: string;
-  status: "PENDING" | "GENERATING" | "GENERATED" | "FAILED";
+  status: "PENDING" | "PROCESSING" | "GENERATED" | "FAILED";
   audioUrl?: string;
   duration?: string;
   audioUrlOrRef?: string | null; // Build 7 Foundation

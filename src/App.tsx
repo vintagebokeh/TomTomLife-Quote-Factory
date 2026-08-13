@@ -1533,9 +1533,9 @@ export default function App() {
       setJob((prev) => {
         const nextJob = { ...prev };
         if (slot === "female") {
-          nextJob.femaleVoice = { ...nextJob.femaleVoice, status: "PENDING" };
+          nextJob.femaleVoice = { ...nextJob.femaleVoice, status: "FAILED" };
         } else {
-          nextJob.maleVoice = { ...nextJob.maleVoice, status: "PENDING" };
+          nextJob.maleVoice = { ...nextJob.maleVoice, status: "FAILED" };
         }
 
         if (typeof err.voiceProcessRunCount === "number") {
