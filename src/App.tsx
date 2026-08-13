@@ -22,7 +22,7 @@ import {
   UploadCloud,
   Activity
 } from "lucide-react";
-import { QuoteJob, JobStatus, ScriptVariants, VideoGenerationRequest, VideoGenerationResult } from "./types";
+import { QuoteJob, JobStatus, ScriptVariants, VideoGenerationRequest, VideoGenerationResult, ProductionAsset, VisualBrief } from "./types";
 import { initialMockJob } from "./mockData";
 import { services } from "./services/pipeline";
 import { supabaseService } from "./services/supabaseService";
@@ -97,6 +97,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"workspace" | "pipeline-guide">("workspace");
   const [playingVoice, setPlayingVoice] = useState<"female" | "male" | null>(null);
   const [playingVideo, setPlayingVideo] = useState(false);
+  const [productionAssets, setProductionAssets] = useState<ProductionAsset[]>([]);
   const [showNotification, setShowNotification] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
 
   // Connection and saving states for Build 2
@@ -152,6 +153,7 @@ export default function App() {
         }
         const fetchedJob = await supabaseService.loadJob("Q000001");
         setJob(fetchedJob);
+        try { setProductionAssets(await supabaseService.listProductionAssets("Q000001")); } catch (assetError) { console.info("Production asset store is unavailable until server credentials are configured.", assetError); }
         setDbStatus("CONNECTED");
         setDbErrorMessage(null);
         notify("Job Q000001 successfully loaded from Supabase.", "success");
@@ -398,6 +400,44 @@ export default function App() {
     if (!candidate.sourceSha256) return "Stage 6 requires a verified source identity.";
     if (!candidate.voiceSourceTextSnapshot) return "Stage 6 requires the selected voice source text snapshot.";
     return null;
+  };
+
+  const getProductionRecipeBlocker = (candidate: QuoteJob): string | null => {
+    const narration = (candidate.productionNarrationSlot || "FEMALE") === "FEMALE" ? candidate.femaleVoice : candidate.maleVoice;
+    if (!candidate.voiceSourceTextSnapshot) return "QUOTE_CINEMATIC_V1 requires a canonical voice source snapshot.";
+    if (!candidate.coreMeaning) return "QUOTE_CINEMATIC_V1 requires canonical core meaning.";
+    if (narration.status !== "GENERATED" || !narration.audioUrlOrRef || !narration.durationMs) return "QUOTE_CINEMATIC_V1 requires the selected generated narration WAV.";
+    return null;
+  };
+
+  const stableRecipeFingerprint = async (value: Record<string, unknown>) => {
+    const normalize = (input: unknown): unknown => {
+      if (Array.isArray(input)) return input.map(normalize);
+      if (input && typeof input === "object") return Object.fromEntries(Object.entries(input as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => [key, normalize(nested)]));
+      return input;
+    };
+    const serialized = JSON.stringify(normalize(value));
+    const bytes = new TextEncoder().encode(serialized);
+    const hash = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(hash)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  };
+
+  const handlePlanProductionRecipe = async () => {
+    const sourceJob = jobRef.current;
+    const blocker = getProductionRecipeBlocker(sourceJob);
+    if (blocker) return notify(blocker, "error");
+    const slot = sourceJob.productionNarrationSlot || "FEMALE";
+    const narration = slot === "FEMALE" ? sourceJob.femaleVoice : sourceJob.maleVoice;
+    const visualBrief: VisualBrief = { subject: sourceJob.coreMeaning.slice(0, 180), scene: "A calm cinematic setting that supports the meaning without reproducing any source media.", mood: "Reflective and hopeful", lighting: "Soft cinematic key light with gentle contrast", composition: "Portrait 9:16, centered subject, generous safe space for deterministic Thai typography", paletteIntent: "Warm dusk blues and gold", negativeConstraints: ["No text", "No letters", "No logos", "No source-media imitation"], aspectRatio: "9:16", textInImage: false };
+    const inputSnapshot = { recipeId: "QUOTE_CINEMATIC_V1", recipeVersion: "1.0", canonicalText: sourceJob.voiceSourceTextSnapshot, coreMeaning: sourceJob.coreMeaning, language: sourceJob.language || "en", narrationSlot: slot, narrationRef: narration.audioUrlOrRef, narrationDurationMs: narration.durationMs, visualBrief };
+    const fingerprint = await stableRecipeFingerprint(inputSnapshot);
+    const planned: QuoteJob = { ...sourceJob, productionRecipeId: "QUOTE_CINEMATIC_V1", productionRecipeVersion: "1.0", productionStatus: "PLANNING", productionNarrationSlot: slot, productionVisualBrief: visualBrief, productionInputFingerprint: fingerprint, productionFailureCode: null, productionFailureMessage: null };
+    setJob(planned); await saveJobToDb(planned);
+    const briefAsset = await supabaseService.saveProductionAsset({ contentId: planned.contentId, recipeId: "QUOTE_CINEMATIC_V1", recipeVersion: "1.0", kind: "VISUAL_BRIEF", status: "READY", mimeType: "application/json", inputSnapshot: { visualBrief, inputFingerprint: fingerprint }, estimatedCost: null });
+    setProductionAssets((assets) => [briefAsset, ...assets.filter((asset) => asset.kind !== "VISUAL_BRIEF")]);
+    const readyToGenerate = { ...planned, productionStatus: "GENERATING_VISUAL" as const };
+    setJob(readyToGenerate); await saveJobToDb(readyToGenerate);
+    notify("QUOTE_CINEMATIC_V1 planned. Keyframe generation is ready for separate operator authorization.", "success");
   };
 
   const handleVideoNarrationSlotChange = async (narrationSlot: "FEMALE" | "MALE") => {
@@ -3421,17 +3461,26 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                         </div>
                         <p className="mt-2 text-[10px] text-slate-500">Only the selected generated WAV is uploaded to Manus. Changing it clears only the Stage 6 video artifact.</p>
                       </div>
+
+                      <div className="bg-emerald-50/50 border border-emerald-100 p-3 rounded-xl space-y-2">
+                        <div className="flex items-center justify-between"><span className="text-[9px] font-black text-emerald-700 uppercase tracking-widest">Production Recipe</span><span className="text-[10px] font-mono text-emerald-800">QUOTE_CINEMATIC_V1 v1.0</span></div>
+                        <p className="text-[10px] text-slate-600">Clean-room inputs only: canonical content, selected narration WAV, and generated recipe assets. Original source media is provenance only.</p>
+                        <div className="grid grid-cols-5 gap-1 text-[9px] font-bold text-slate-600">
+                          {(["VISUAL_BRIEF", "KEYFRAME", "MOTION", "SUBTITLE", "FINAL_MASTER"] as const).map((kind) => <span key={kind} className={`rounded px-1 py-1 text-center ${productionAssets.find((asset) => asset.kind === kind)?.status === "READY" ? "bg-emerald-200" : "bg-white"}`}>{kind.replace("_", " ")}</span>)}
+                        </div>
+                        <p className="text-[10px] text-slate-500">Status: {job.productionStatus || "NOT_STARTED"}</p>
+                      </div>
                     </div>
 
                     <div className="pt-2">
                       <button
-                        onClick={handleGenerateVideoDirectly}
-                        disabled={!!getStage6EntryBlocker(job) || job.videoStatus === "RENDERING"}
+                        onClick={() => void handlePlanProductionRecipe()}
+                        disabled={!!getProductionRecipeBlocker(job) || job.productionStatus === "COMPOSING"}
                         className="w-full bg-slate-900 hover:bg-slate-800 text-white font-black py-2.5 px-4 rounded-lg text-[10px] uppercase tracking-widest transition flex items-center justify-center space-x-2 shadow-xs cursor-pointer disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed"
                         id="btn-generate-final-video"
                       >
                         <Video className="h-4 w-4" />
-                        <span>{getStage6EntryBlocker(job) || (job.videoStatus === "RENDERING" ? "Generating Manus Video..." : job.videoStatus === "FAILED" ? "Retry Manus Video Generation" : "Generate Manus Video")}</span>
+                        <span>{getProductionRecipeBlocker(job) || "Plan QUOTE_CINEMATIC_V1"}</span>
                       </button>
                     </div>
 

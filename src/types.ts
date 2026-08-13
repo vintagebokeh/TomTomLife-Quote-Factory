@@ -30,6 +30,47 @@ export interface ScriptVariants {
   scriptC: string;
 }
 
+export type ProductionStatus = "NOT_STARTED" | "PLANNING" | "GENERATING_VISUAL" | "COMPOSING" | "READY" | "FAILED";
+export type ProductionAssetKind = "VISUAL_BRIEF" | "KEYFRAME" | "MOTION" | "SUBTITLE" | "FINAL_MASTER";
+export type ProductionAssetStatus = "PENDING" | "PROCESSING" | "READY" | "FAILED" | "STALE";
+
+export interface VisualBrief {
+  subject: string;
+  scene: string;
+  mood: string;
+  lighting: string;
+  composition: string;
+  paletteIntent: string;
+  negativeConstraints: string[];
+  aspectRatio: "9:16";
+  textInImage: false;
+}
+
+export interface ProductionAsset {
+  id?: string;
+  contentId: string;
+  recipeId: "QUOTE_CINEMATIC_V1";
+  recipeVersion: "1.0";
+  kind: ProductionAssetKind;
+  status: ProductionAssetStatus;
+  localRef?: string | null;
+  mimeType?: string | null;
+  width?: number | null;
+  height?: number | null;
+  durationMs?: number | null;
+  fileSizeBytes?: number | null;
+  sha256?: string | null;
+  provider?: string | null;
+  engine?: string | null;
+  providerTaskId?: string | null;
+  inputSnapshot?: Record<string, unknown> | null;
+  failureCode?: string | null;
+  failureMessage?: string | null;
+  estimatedCost?: number | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+}
+
 export interface QuoteJob {
   contentId: string;
   status: JobStatus;
@@ -41,6 +82,15 @@ export interface QuoteJob {
   stage6VisualRef?: string | null;
   // V1 Stage 6 uses one canonical narration track per rendered video.
   videoNarrationSlot?: "FEMALE" | "MALE" | null;
+  productionRecipeId?: "QUOTE_CINEMATIC_V1" | null;
+  productionRecipeVersion?: "1.0" | null;
+  productionStatus?: ProductionStatus;
+  productionInputFingerprint?: string | null;
+  productionNarrationSlot?: "FEMALE" | "MALE" | null;
+  productionVisualBrief?: VisualBrief | null;
+  productionFinalAssetId?: string | null;
+  productionFailureCode?: string | null;
+  productionFailureMessage?: string | null;
   rawOcr: string;
   cleanText: string;
   coreMeaning: string;

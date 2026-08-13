@@ -65,3 +65,41 @@ ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_has_audio BOOLEAN;
 ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_failure_code TEXT;
 ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_failure_message TEXT;
 ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_estimated_cost NUMERIC;
+
+-- Build 8D clean-room QUOTE_CINEMATIC_V1 production recipe.
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS production_recipe_id TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS production_recipe_version TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS production_status TEXT NOT NULL DEFAULT 'NOT_STARTED';
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS production_input_fingerprint TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS production_narration_slot VARCHAR(10) NOT NULL DEFAULT 'FEMALE';
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS production_visual_brief JSONB;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS production_final_asset_id UUID;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS production_failure_code TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS production_failure_message TEXT;
+
+CREATE TABLE IF NOT EXISTS production_assets (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  content_id VARCHAR(50) NOT NULL REFERENCES quote_jobs(content_id) ON DELETE CASCADE,
+  recipe_id TEXT NOT NULL,
+  recipe_version TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('VISUAL_BRIEF', 'KEYFRAME', 'MOTION', 'SUBTITLE', 'FINAL_MASTER')),
+  status TEXT NOT NULL CHECK (status IN ('PENDING', 'PROCESSING', 'READY', 'FAILED', 'STALE')),
+  local_ref TEXT,
+  mime_type TEXT,
+  width INT,
+  height INT,
+  duration_ms INT,
+  file_size_bytes BIGINT,
+  sha256 TEXT,
+  provider TEXT,
+  engine TEXT,
+  provider_task_id TEXT,
+  input_snapshot JSONB,
+  failure_code TEXT,
+  failure_message TEXT,
+  estimated_cost NUMERIC,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+CREATE INDEX IF NOT EXISTS production_assets_content_recipe_kind_idx ON production_assets(content_id, recipe_id, recipe_version, kind, updated_at DESC);
+ALTER TABLE production_assets ENABLE ROW LEVEL SECURITY;

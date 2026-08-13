@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { QuoteJob, JobStatus } from "../types";
+import { QuoteJob, JobStatus, ProductionAsset, VisualBrief } from "../types";
 import { initialMockJob } from "../mockData";
 
 const supabaseUrl = (import.meta as any).env.VITE_SUPABASE_URL || "";
@@ -89,6 +89,15 @@ export interface QuoteJobRow {
   video_failure_code?: string | null;
   video_failure_message?: string | null;
   video_estimated_cost?: number | null;
+  production_recipe_id?: "QUOTE_CINEMATIC_V1" | null;
+  production_recipe_version?: "1.0" | null;
+  production_status?: QuoteJob["productionStatus"] | null;
+  production_input_fingerprint?: string | null;
+  production_narration_slot?: "FEMALE" | "MALE" | null;
+  production_visual_brief?: VisualBrief | null;
+  production_final_asset_id?: string | null;
+  production_failure_code?: string | null;
+  production_failure_message?: string | null;
 }
 
 export function mapRowToJob(row: QuoteJobRow): QuoteJob {
@@ -146,6 +155,15 @@ export function mapRowToJob(row: QuoteJobRow): QuoteJob {
     videoFailureCode: row.video_failure_code || null,
     videoFailureMessage: row.video_failure_message || null,
     videoEstimatedCost: row.video_estimated_cost || null,
+    productionRecipeId: row.production_recipe_id || "QUOTE_CINEMATIC_V1",
+    productionRecipeVersion: row.production_recipe_version || "1.0",
+    productionStatus: row.production_status || "NOT_STARTED",
+    productionInputFingerprint: row.production_input_fingerprint || null,
+    productionNarrationSlot: row.production_narration_slot || "FEMALE",
+    productionVisualBrief: row.production_visual_brief || null,
+    productionFinalAssetId: row.production_final_asset_id || null,
+    productionFailureCode: row.production_failure_code || null,
+    productionFailureMessage: row.production_failure_message || null,
     failedStage: row.failed_stage || undefined,
     errorMessage: row.error_message || undefined,
     // Build 5 Observability & Accounting Patch Mappings
@@ -262,6 +280,15 @@ export function mapJobToRow(job: QuoteJob): QuoteJobRow {
     video_failure_code: job.videoFailureCode || null,
     video_failure_message: job.videoFailureMessage || null,
     video_estimated_cost: null,
+    production_recipe_id: job.productionRecipeId || "QUOTE_CINEMATIC_V1",
+    production_recipe_version: job.productionRecipeVersion || "1.0",
+    production_status: job.productionStatus || "NOT_STARTED",
+    production_input_fingerprint: job.productionInputFingerprint || null,
+    production_narration_slot: job.productionNarrationSlot || "FEMALE",
+    production_visual_brief: job.productionVisualBrief || null,
+    production_final_asset_id: job.productionFinalAssetId || null,
+    production_failure_code: job.productionFailureCode || null,
+    production_failure_message: job.productionFailureMessage || null,
   };
 }
 
@@ -336,5 +363,34 @@ export const supabaseService = {
     if (error) {
       throw new Error(`Database save error: ${error.message}`);
     }
+  },
+
+  async listProductionAssets(contentId: string): Promise<ProductionAsset[]> {
+    const response = await fetch(`/api/production/assets/${encodeURIComponent(contentId)}`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.message || "Production asset load error.");
+    return (payload.assets || []).map((row: any): ProductionAsset => ({
+      id: row.id, contentId: row.content_id, recipeId: row.recipe_id, recipeVersion: row.recipe_version,
+      kind: row.kind, status: row.status, localRef: row.local_ref, mimeType: row.mime_type,
+      width: row.width, height: row.height, durationMs: row.duration_ms, fileSizeBytes: row.file_size_bytes,
+      sha256: row.sha256, provider: row.provider, engine: row.engine, providerTaskId: row.provider_task_id,
+      inputSnapshot: row.input_snapshot, failureCode: row.failure_code, failureMessage: row.failure_message,
+      estimatedCost: row.estimated_cost, createdAt: row.created_at, updatedAt: row.updated_at
+    }));
+  },
+
+  async saveProductionAsset(asset: ProductionAsset): Promise<ProductionAsset> {
+    const response = await fetch("/api/production/assets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ asset }) });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.message || "Production asset save error.");
+    const data = payload.asset;
+    return {
+      id: data.id, contentId: data.content_id, recipeId: data.recipe_id, recipeVersion: data.recipe_version,
+      kind: data.kind, status: data.status, localRef: data.local_ref, mimeType: data.mime_type,
+      width: data.width, height: data.height, durationMs: data.duration_ms, fileSizeBytes: data.file_size_bytes,
+      sha256: data.sha256, provider: data.provider, engine: data.engine, providerTaskId: data.provider_task_id,
+      inputSnapshot: data.input_snapshot, failureCode: data.failure_code, failureMessage: data.failure_message,
+      estimatedCost: data.estimated_cost, createdAt: data.created_at, updatedAt: data.updated_at
+    };
   }
 };

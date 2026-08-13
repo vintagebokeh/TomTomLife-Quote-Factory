@@ -7,5 +7,6 @@ coverage/
 audio/
 video/
 source/
+production/
 .env*
 !.env.example

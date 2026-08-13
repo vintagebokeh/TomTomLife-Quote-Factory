@@ -3,6 +3,7 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
+import { createClient } from "@supabase/supabase-js";
 import fs from "fs";
 import { execFile } from "child_process";
 import { createHash, randomUUID } from "crypto";
@@ -65,8 +66,22 @@ const MANUS_AGENT_PROFILE = "manus-1.6-lite";
 const MANUS_POLL_INTERVAL_MS = 3000;
 const MANUS_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 const MANUS_TASK_VISIBILITY_RETRY_DELAYS_MS = [1000, 2000, 3000] as const;
+const PRODUCTION_RECIPE_ID = "QUOTE_CINEMATIC_V1";
+const PRODUCTION_RECIPE_VERSION = "1.0";
+const PRODUCTION_ASSET_KINDS = new Set(["VISUAL_BRIEF", "KEYFRAME", "MOTION", "SUBTITLE", "FINAL_MASTER"]);
+const PRODUCTION_ASSET_STATUSES = new Set(["PENDING", "PROCESSING", "READY", "FAILED", "STALE"]);
+
+const getProductionStore = () => {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  return url && key ? createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } }) : null;
+};
 
 const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const runFfmpeg = (args: string[]) => new Promise<void>((resolve, reject) => {
+  execFile("ffmpeg", args, (error, _stdout, stderr) => error ? reject(new Error(stderr || error.message)) : resolve());
+});
 
 const inspectVideoArtifact = (filePath: string): Promise<Record<string, unknown>> => new Promise((resolve) => {
   execFile("ffprobe", ["-v", "error", "-show_entries", "format=format_name,duration,size:stream=codec_type,codec_name,width,height,r_frame_rate", "-of", "json", filePath], (error, stdout) => {
@@ -315,10 +330,13 @@ async function startServer() {
   // Stage 6 keeps visual and video artifacts server-owned; browser blob URLs are never durable refs.
   const sourceDir = path.join(process.cwd(), "source");
   const videoDir = path.join(process.cwd(), "video");
+  const productionDir = path.join(process.cwd(), "production");
   fs.mkdirSync(sourceDir, { recursive: true });
   fs.mkdirSync(videoDir, { recursive: true });
+  fs.mkdirSync(productionDir, { recursive: true });
   app.use("/source", express.static(sourceDir));
   app.use("/video", express.static(videoDir));
+  app.use("/production", express.static(productionDir));
 
   app.post("/api/source-artifacts", (req, res) => {
     const { fileName, mimeType, dataBase64 } = req.body || {};
@@ -1158,6 +1176,94 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
       };
       return res.status(failure.statusCode).json({ error: failure.code, message: failure.message, result, videoProcessRunCount: previousVideoProcessRunCount + (providerAttemptStarted ? 1 : 0), videoStartedAt: startedAt });
     }
+  });
+
+  // Build 8D clean-room recipe adapter. It accepts canonical content only; original /source artifacts are deliberately absent.
+  app.post("/api/production/keyframe", async (req, res) => {
+    const { contentId, recipeId, recipeVersion, inputFingerprint, visualBrief } = req.body || {};
+    if (typeof contentId !== "string" || recipeId !== "QUOTE_CINEMATIC_V1" || recipeVersion !== "1.0" || typeof inputFingerprint !== "string" || !visualBrief || visualBrief.aspectRatio !== "9:16" || visualBrief.textInImage !== false) {
+      return res.status(400).json({ error: "INVALID_PRODUCTION_RECIPE_INPUT", message: "QUOTE_CINEMATIC_V1 requires a canonical VisualBrief and recipe fingerprint." });
+    }
+    const apiKey = process.env.MANUS_API_KEY;
+    if (!apiKey) return res.status(503).json({ error: "IMAGE_PROVIDER_NOT_CONFIGURED", message: "The image provider is not configured on this server." });
+    const prompt = `Generate exactly one original vertical 9:16 cinematic keyframe. Subject: ${visualBrief.subject}. Scene: ${visualBrief.scene}. Mood: ${visualBrief.mood}. Lighting: ${visualBrief.lighting}. Composition: ${visualBrief.composition}. Palette: ${visualBrief.paletteIntent}. Do not include any words, letters, captions, logos, or typography in the image.`;
+    let taskId: string | null = null;
+    try {
+      const created = await fetch(`${MANUS_API_BASE}/task.create`, { method: "POST", headers: { "Content-Type": "application/json", "x-manus-api-key": apiKey }, body: JSON.stringify({ message: { content: [{ type: "text", text: prompt }] }, agent_profile: MANUS_AGENT_PROFILE, interactive_mode: false, share_visibility: "private", title: `TomTomLife keyframe ${contentId}` }) });
+      const payload = await created.json().catch(() => ({}));
+      if (!created.ok || payload?.ok === false || typeof payload?.task_id !== "string") throw new Stage6Error("KEYFRAME_TASK_CREATE_FAILED", getManusError(payload, "Keyframe task creation failed."));
+      taskId = payload.task_id;
+      const attachments = await pollManusTask(apiKey, taskId, `keyframe-${Date.now()}-${randomUUID().slice(0, 8)}`, Date.now());
+      const image = attachments.find((item) => typeof item.content_type === "string" && item.content_type.toLowerCase().startsWith("image/") && typeof item.url === "string");
+      if (!image) throw new Stage6Error("KEYFRAME_ATTACHMENT_MISSING", "The provider did not return an image artifact.", 502, taskId);
+      const downloaded = await fetch(image.url!);
+      const bytes = Buffer.from(await downloaded.arrayBuffer());
+      if (!downloaded.ok || !bytes.length) throw new Stage6Error("KEYFRAME_DOWNLOAD_FAILED", "Unable to download the generated keyframe.", 502, taskId);
+      const safeContentId = contentId.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const outputDirectory = path.join(productionDir, safeContentId, "QUOTE_CINEMATIC_V1", "keyframe");
+      fs.mkdirSync(outputDirectory, { recursive: true });
+      const extension = image.content_type!.toLowerCase().includes("png") ? "png" : "jpg";
+      const filename = `keyframe_${Date.now()}_${randomUUID().slice(0, 8)}.${extension}`;
+      const outputPath = path.join(outputDirectory, filename);
+      fs.writeFileSync(outputPath, bytes);
+      const probe = await inspectVideoArtifact(outputPath);
+      const stream = Array.isArray(probe.streams) ? probe.streams[0] as Record<string, unknown> : null;
+      const width = Number(stream?.width); const height = Number(stream?.height);
+      if (probe.available !== true || !Number.isFinite(width) || !Number.isFinite(height) || height <= width) { fs.unlinkSync(outputPath); throw new Stage6Error("KEYFRAME_VALIDATION_FAILED", "Generated keyframe was not a decodable portrait image.", 502, taskId); }
+      return res.json({ asset: { contentId, recipeId, recipeVersion, kind: "KEYFRAME", status: "READY", localRef: `/production/${safeContentId}/QUOTE_CINEMATIC_V1/keyframe/${filename}`, mimeType: image.content_type, width, height, fileSizeBytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), provider: "manus", engine: MANUS_AGENT_PROFILE, providerTaskId: taskId, inputSnapshot: { visualBrief, inputFingerprint }, estimatedCost: null } });
+    } catch (error: any) {
+      const failure = error instanceof Stage6Error ? error : new Stage6Error("KEYFRAME_PROVIDER_FAILED", error?.message || "Keyframe generation failed.", 502, taskId);
+      return res.status(failure.statusCode).json({ error: failure.code, message: failure.message, asset: { contentId, recipeId, recipeVersion, kind: "KEYFRAME", status: "FAILED", provider: "manus", engine: MANUS_AGENT_PROFILE, providerTaskId: taskId, failureCode: failure.code, failureMessage: failure.message, estimatedCost: null } });
+    }
+  });
+
+  app.post("/api/production/compose", async (req, res) => {
+    const { contentId, recipeId, recipeVersion, keyframeRef, narrationRef, narrationDurationMs, canonicalText, inputFingerprint } = req.body || {};
+    if (recipeId !== "QUOTE_CINEMATIC_V1" || recipeVersion !== "1.0" || typeof contentId !== "string" || typeof keyframeRef !== "string" || typeof narrationRef !== "string" || !Number.isFinite(narrationDurationMs) || narrationDurationMs <= 0 || typeof canonicalText !== "string" || typeof inputFingerprint !== "string") return res.status(400).json({ error: "INVALID_PRODUCTION_COMPOSITION_INPUT", message: "Composition requires a recipe keyframe, canonical WAV, duration, and text snapshot." });
+    const keyframePath = path.join(productionDir, keyframeRef.replace(/^\/production\//, ""));
+    const narrationPath = resolveOwnedArtifactPath(narrationRef, audioDir);
+    if (!keyframeRef.startsWith("/production/") || !fs.existsSync(keyframePath) || !isOwnedArtifactRef(narrationRef, "/audio", audioDir)) return res.status(400).json({ error: "PRODUCTION_ARTIFACT_MISSING", message: "The canonical keyframe or narration artifact is missing." });
+    const safeContentId = contentId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const root = path.join(productionDir, safeContentId, "QUOTE_CINEMATIC_V1");
+    const motionDir = path.join(root, "motion"); const subtitleDir = path.join(root, "subtitle"); const finalDir = path.join(root, "final");
+    [motionDir, subtitleDir, finalDir].forEach((dir) => fs.mkdirSync(dir, { recursive: true }));
+    const token = `${Date.now()}_${randomUUID().slice(0, 8)}`;
+    const motionPath = path.join(motionDir, `motion_${token}.mp4`); const subtitlePath = path.join(subtitleDir, `subtitle_${token}.ass`); const finalPath = path.join(finalDir, `final_${token}.mp4`);
+    const assText = canonicalText.replace(/\\/g, "\\\\").replace(/[{}]/g, "").replace(/\r?\n/g, "\\N");
+    fs.writeFileSync(subtitlePath, `[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,OutlineColour,BackColour,Bold,Italic,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Quote,Leelaw UI,54,&H00FFFFFF,&H00101010,&H70000000,0,0,2,100,100,220,1\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\nDialogue: 0,0:00:00.00,9:59:59.00,Quote,,0,0,0,,${assText}\n`, "utf8");
+    try {
+      const seconds = (narrationDurationMs / 1000).toFixed(3);
+      await runFfmpeg(["-y", "-loop", "1", "-i", keyframePath, "-t", seconds, "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,zoompan=z='min(zoom+0.0003,1.06)':d=1:s=1080x1920:fps=30,format=yuv420p", "-an", "-c:v", "libx264", "-movflags", "+faststart", motionPath]);
+      await runFfmpeg(["-y", "-i", motionPath, "-i", narrationPath, "-vf", `ass=${subtitlePath.replace(/\\/g, "/").replace(/:/g, "\\:")}`, "-map", "0:v:0", "-map", "1:a:0", "-shortest", "-c:v", "libx264", "-c:a", "aac", "-movflags", "+faststart", finalPath]);
+      const metadata = await validateDownloadedVideo(finalPath, "video/mp4");
+      const toRef = (filePath: string) => `/production/${path.relative(productionDir, filePath).replace(/\\/g, "/")}`;
+      return res.json({ motion: { contentId, recipeId, recipeVersion, kind: "MOTION", status: "READY", localRef: toRef(motionPath), mimeType: "video/mp4", durationMs: narrationDurationMs, fileSizeBytes: fs.statSync(motionPath).size, sha256: sha256File(motionPath), inputSnapshot: { keyframeRef, inputFingerprint }, estimatedCost: null }, subtitle: { contentId, recipeId, recipeVersion, kind: "SUBTITLE", status: "READY", localRef: toRef(subtitlePath), mimeType: "text/x-ass", fileSizeBytes: fs.statSync(subtitlePath).size, sha256: sha256File(subtitlePath), inputSnapshot: { canonicalText, inputFingerprint }, estimatedCost: null }, final: { contentId, recipeId, recipeVersion, kind: "FINAL_MASTER", status: "READY", localRef: toRef(finalPath), inputSnapshot: { keyframeRef, narrationRef, inputFingerprint }, estimatedCost: null, ...metadata } });
+    } catch (error: any) { return res.status(502).json({ error: "PRODUCTION_COMPOSITION_FAILED", message: error.message || "Deterministic production composition failed." }); }
+  });
+
+  app.get("/api/production/assets/:contentId", async (req, res) => {
+    const store = getProductionStore();
+    if (!store) return res.status(503).json({ error: "PRODUCTION_STORE_NOT_CONFIGURED", message: "Server production persistence is not configured." });
+    const { data: job } = await store.from("quote_jobs").select("content_id").eq("content_id", req.params.contentId).maybeSingle();
+    if (!job) return res.status(404).json({ error: "PRODUCTION_JOB_NOT_FOUND", message: "Unknown production content ID." });
+    const { data, error } = await store.from("production_assets").select("*").eq("content_id", req.params.contentId).order("updated_at", { ascending: false });
+    if (error) return res.status(502).json({ error: "PRODUCTION_STORE_READ_FAILED", message: "Unable to load production assets." });
+    return res.json({ assets: data || [] });
+  });
+
+  app.post("/api/production/assets", async (req, res) => {
+    const store = getProductionStore();
+    if (!store) return res.status(503).json({ error: "PRODUCTION_STORE_NOT_CONFIGURED", message: "Server production persistence is not configured." });
+    const asset = req.body?.asset || {};
+    if (typeof asset.contentId !== "string" || asset.recipeId !== PRODUCTION_RECIPE_ID || asset.recipeVersion !== PRODUCTION_RECIPE_VERSION || !PRODUCTION_ASSET_KINDS.has(asset.kind) || !PRODUCTION_ASSET_STATUSES.has(asset.status)) return res.status(400).json({ error: "INVALID_PRODUCTION_ASSET", message: "Production asset contract rejected." });
+    const { data: job } = await store.from("quote_jobs").select("content_id").eq("content_id", asset.contentId).maybeSingle();
+    if (!job) return res.status(404).json({ error: "PRODUCTION_JOB_NOT_FOUND", message: "Unknown production content ID." });
+    if (asset.localRef != null && (typeof asset.localRef !== "string" || !asset.localRef.startsWith("/production/"))) return res.status(400).json({ error: "INVALID_PRODUCTION_REFERENCE", message: "Only server-owned /production references may be persisted." });
+    const row = { content_id: asset.contentId, recipe_id: asset.recipeId, recipe_version: asset.recipeVersion, kind: asset.kind, status: asset.status, local_ref: asset.localRef || null, mime_type: asset.mimeType || null, width: Number.isFinite(asset.width) ? asset.width : null, height: Number.isFinite(asset.height) ? asset.height : null, duration_ms: Number.isFinite(asset.durationMs) ? asset.durationMs : null, file_size_bytes: Number.isFinite(asset.fileSizeBytes) ? asset.fileSizeBytes : null, sha256: asset.sha256 || null, provider: asset.provider || null, engine: asset.engine || null, provider_task_id: asset.providerTaskId || null, input_snapshot: asset.inputSnapshot || null, failure_code: asset.failureCode || null, failure_message: asset.failureMessage || null, estimated_cost: null, updated_at: new Date().toISOString() };
+    const query = typeof asset.id === "string" ? store.from("production_assets").update(row).eq("id", asset.id).select().single() : store.from("production_assets").insert(row).select().single();
+    const { data, error } = await query;
+    if (error) return res.status(502).json({ error: "PRODUCTION_STORE_WRITE_FAILED", message: "Unable to persist production asset metadata." });
+    return res.status(201).json({ asset: data });
   });
 
   // Catch JSON syntax errors from body parser before they propagate to static fallback
