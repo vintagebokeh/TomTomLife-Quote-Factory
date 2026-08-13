@@ -40,3 +40,26 @@ CREATE POLICY "Allow public read and write access for development"
 ON quote_jobs FOR ALL 
 USING (true) 
 WITH CHECK (true);
+
+-- Build 8A Stage 6 provider-neutral video foundation. These ALTER statements
+-- also apply cleanly to databases provisioned by earlier Build 7 handoffs.
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS stage6_visual_ref TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_status VARCHAR(20) NOT NULL DEFAULT 'PENDING';
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_url_or_ref TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_provider TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_engine TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_provider_task_id TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_process_run_count INT NOT NULL DEFAULT 0;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_last_processed_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_last_latency_ms INT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_provider_mime_type TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_provider_filename TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_file_size_bytes BIGINT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_duration_ms INT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_width INT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_height INT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_frame_rate DOUBLE PRECISION;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_has_audio BOOLEAN;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_failure_code TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_failure_message TEXT;
+ALTER TABLE quote_jobs ADD COLUMN IF NOT EXISTS video_estimated_cost NUMERIC;

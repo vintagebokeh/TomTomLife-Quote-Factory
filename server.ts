@@ -4,6 +4,49 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import fs from "fs";
+import { execFile } from "child_process";
+
+interface VideoGenerationRequest {
+  contentId?: unknown;
+  jobStatus?: unknown;
+  visualRef?: unknown;
+  voiceSourceTextSnapshot?: unknown;
+  language?: unknown;
+  femaleAudioStatus?: unknown;
+  maleAudioStatus?: unknown;
+  femaleAudioRef?: unknown;
+  maleAudioRef?: unknown;
+}
+
+interface VideoGenerationResult {
+  status: "READY" | "FAILED";
+  provider: string;
+  engine: string;
+  providerTaskId?: string | null;
+  videoUrlOrRef?: string | null;
+  mimeType?: string | null;
+  filename?: string | null;
+  fileSizeBytes?: number | null;
+  durationMs?: number | null;
+  width?: number | null;
+  height?: number | null;
+  frameRate?: number | null;
+  hasAudio?: boolean | null;
+  latencyMs?: number | null;
+  failureCode?: string | null;
+  failureMessage?: string | null;
+}
+
+const inspectVideoArtifact = (filePath: string): Promise<Record<string, unknown>> => new Promise((resolve) => {
+  execFile("ffprobe", ["-v", "error", "-show_entries", "format=duration,size:stream=codec_type,codec_name,width,height,r_frame_rate", "-of", "json", filePath], (error, stdout) => {
+    if (error) return resolve({ available: false, code: "FFPROBE_UNAVAILABLE", message: error.message });
+    try {
+      resolve({ available: true, ...(JSON.parse(stdout) as Record<string, unknown>) });
+    } catch {
+      resolve({ available: false, code: "FFPROBE_INVALID_OUTPUT", message: "ffprobe did not return valid JSON." });
+    }
+  });
+});
 
 async function startServer() {
   const app = express();
@@ -19,6 +62,33 @@ async function startServer() {
   }
   // Serve audio folder statically
   app.use("/audio", express.static(audioDir));
+
+  // Stage 6 keeps visual and video artifacts server-owned; browser blob URLs are never durable refs.
+  const sourceDir = path.join(process.cwd(), "source");
+  const videoDir = path.join(process.cwd(), "video");
+  fs.mkdirSync(sourceDir, { recursive: true });
+  fs.mkdirSync(videoDir, { recursive: true });
+  app.use("/source", express.static(sourceDir));
+  app.use("/video", express.static(videoDir));
+
+  app.post("/api/source-artifacts", (req, res) => {
+    const { fileName, mimeType, dataBase64 } = req.body || {};
+    const acceptedMime = typeof mimeType === "string" && /^(image|video)\//i.test(mimeType);
+    if (typeof fileName !== "string" || !acceptedMime || typeof dataBase64 !== "string" || !dataBase64) {
+      return res.status(400).json({ error: "INVALID_SOURCE_ARTIFACT", message: "A source filename, image/video MIME type, and Base64 payload are required." });
+    }
+
+    try {
+      const payload = Buffer.from(dataBase64, "base64");
+      if (!payload.length) throw new Error("Decoded payload is empty.");
+      const safeName = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, "_");
+      const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}_${safeName}`;
+      fs.writeFileSync(path.join(sourceDir, filename), payload);
+      return res.status(201).json({ sourceRef: `/source/${filename}`, filename, mimeType, sizeBytes: payload.length });
+    } catch (error: any) {
+      return res.status(400).json({ error: "SOURCE_ARTIFACT_WRITE_FAILED", message: error.message || "Unable to persist the source artifact." });
+    }
+  });
 
   // Endpoint to check configuration status
   app.get("/api/config-status", (req, res) => {
@@ -666,6 +736,34 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
         lastVoiceProcessAt: providerAttemptStartedAt
       });
     }
+  });
+
+  // Stage 6 provider-neutral boundary. A future adapter may read MANUS_API_KEY here on the server only.
+  app.post("/api/generate-video", (req, res) => {
+    const request = (req.body || {}) as VideoGenerationRequest;
+    const entryErrors: string[] = [];
+    if (request.jobStatus !== "AUDIO_READY") entryErrors.push("jobStatus must be AUDIO_READY");
+    if (typeof request.contentId !== "string" || !request.contentId) entryErrors.push("contentId is required");
+    if (typeof request.visualRef !== "string" || !request.visualRef.startsWith("/source/")) entryErrors.push("visualRef must be a server-owned /source/ reference");
+    if (typeof request.voiceSourceTextSnapshot !== "string" || !request.voiceSourceTextSnapshot.trim()) entryErrors.push("voiceSourceTextSnapshot is required");
+    if (typeof request.language !== "string" || !request.language) entryErrors.push("language is required");
+    if (request.femaleAudioStatus !== "GENERATED") entryErrors.push("femaleAudioStatus must be GENERATED");
+    if (request.maleAudioStatus !== "GENERATED") entryErrors.push("maleAudioStatus must be GENERATED");
+    if (typeof request.femaleAudioRef !== "string" || !request.femaleAudioRef.startsWith("/audio/")) entryErrors.push("femaleAudioRef must be a server-owned /audio/ reference");
+    if (typeof request.maleAudioRef !== "string" || !request.maleAudioRef.startsWith("/audio/")) entryErrors.push("maleAudioRef must be a server-owned /audio/ reference");
+
+    if (entryErrors.length) {
+      return res.status(400).json({ error: "INVALID_STAGE6_INPUT", message: "Stage 6 entry contract rejected.", details: entryErrors });
+    }
+
+    const result: VideoGenerationResult = {
+      status: "FAILED",
+      provider: "not-configured",
+      engine: "not-configured",
+      failureCode: "VIDEO_PROVIDER_NOT_CONFIGURED",
+      failureMessage: "No Stage 6 video provider adapter is configured. No provider request or video artifact was created."
+    };
+    return res.status(501).json({ error: result.failureCode, message: result.failureMessage, result });
   });
 
   // Catch JSON syntax errors from body parser before they propagate to static fallback

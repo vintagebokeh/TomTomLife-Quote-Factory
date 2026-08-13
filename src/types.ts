@@ -35,7 +35,9 @@ export interface QuoteJob {
   status: JobStatus;
   sourceFilename: string;
   sourceType: "image" | "video";
-  sourceUrl: string; // Placeholder or static mock image
+  sourceUrl: string;
+  // Server-owned visual reference required by Stage 6; browser blob URLs are preview-only.
+  stage6VisualRef?: string | null;
   rawOcr: string;
   cleanText: string;
   coreMeaning: string;
@@ -43,7 +45,24 @@ export interface QuoteJob {
   femaleVoice: VoiceSlot;
   maleVoice: VoiceSlot;
   videoStatus: "PENDING" | "RENDERING" | "READY" | "FAILED";
-  videoUrl?: string; // final MP4 placeholder url
+  videoUrlOrRef?: string | null;
+  videoProvider?: string | null;
+  videoEngine?: string | null;
+  videoProviderTaskId?: string | null;
+  videoProcessRunCount?: number;
+  videoLastProcessedAt?: string | null;
+  videoLastLatencyMs?: number | null;
+  videoProviderMimeType?: string | null;
+  videoProviderFilename?: string | null;
+  videoFileSizeBytes?: number | null;
+  videoDurationMs?: number | null;
+  videoWidth?: number | null;
+  videoHeight?: number | null;
+  videoFrameRate?: number | null;
+  videoHasAudio?: boolean | null;
+  videoFailureCode?: string | null;
+  videoFailureMessage?: string | null;
+  videoEstimatedCost?: number | null;
   failedStage?: string;
   errorMessage?: string;
   // Build 5 Observability & Accounting Patch
@@ -108,11 +127,33 @@ export interface IVoiceService {
   generateVoice(script: string, voiceId: string): Promise<string>; // returns audio placeholder url
 }
 
-export interface IVideoService {
-  composeVideo(params: {
-    sourceUrl: string;
-    script: string;
-    audioUrl: string;
-    format: "1080x1920";
-  }): Promise<string>; // returns final video mp4 url
+export interface VideoGenerationRequest {
+  contentId: string;
+  jobStatus: JobStatus;
+  visualRef: string;
+  voiceSourceTextSnapshot: string;
+  language: string;
+  femaleAudioStatus: "GENERATED";
+  maleAudioStatus: "GENERATED";
+  femaleAudioRef: string;
+  maleAudioRef: string;
+}
+
+export interface VideoGenerationResult {
+  status: "READY" | "FAILED";
+  provider: string;
+  engine: string;
+  providerTaskId?: string | null;
+  videoUrlOrRef?: string | null;
+  mimeType?: string | null;
+  filename?: string | null;
+  fileSizeBytes?: number | null;
+  durationMs?: number | null;
+  width?: number | null;
+  height?: number | null;
+  frameRate?: number | null;
+  hasAudio?: boolean | null;
+  latencyMs?: number | null;
+  failureCode?: string | null;
+  failureMessage?: string | null;
 }

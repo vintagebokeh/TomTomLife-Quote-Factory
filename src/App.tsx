@@ -97,8 +97,6 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"workspace" | "pipeline-guide">("workspace");
   const [playingVoice, setPlayingVoice] = useState<"female" | "male" | null>(null);
   const [playingVideo, setPlayingVideo] = useState(false);
-  const [videoRenderingProgress, setVideoRenderingProgress] = useState(0);
-  const [isRenderingVideo, setIsRenderingVideo] = useState(false);
   const [showNotification, setShowNotification] = useState<{ message: string; type: "success" | "error" | "info" } | null>(null);
 
   // Connection and saving states for Build 2
@@ -246,6 +244,10 @@ export default function App() {
 
   // Directly change state (for testing / manual state overrides)
   const setJobStatusDirectly = async (status: JobStatus, failedStage?: string, errorMsg?: string) => {
+    if (status === "VIDEO_READY" || status === "REVIEW") {
+      notify("Stage 6 status cannot be simulated. VIDEO_READY requires a verified provider artifact.", "info");
+      return;
+    }
     let nextJob: QuoteJob | null = null;
     setJob((prev) => {
       const updated = { ...prev, status };
@@ -352,43 +354,12 @@ export default function App() {
         notify("Voice synthesis is in Foundation phase. Please execute Stage 5 Voice generation manually to progress.", "info");
         return;
       } else if (job.status === "AUDIO_READY") {
-        // Video ready step
-        setJob((prev) => {
-          const next = {
-            ...prev,
-            status: "VIDEO_READY" as JobStatus
-          };
-          nextJob = next;
-          return next;
-        });
-        notify("Voices are ready. Proceeding to Video compilation.", "success");
+        setIsSimulating(false);
+        notify("Stage 6 provider integration is pending. Audio-ready work is preserved; no video artifact was created.", "info");
+        return;
       } else if (job.status === "VIDEO_READY") {
-        // Video render step
-        setIsRenderingVideo(true);
-        let prog = 0;
-        const interval = setInterval(async () => {
-          prog += 10;
-          setVideoRenderingProgress(prog);
-          if (prog >= 100) {
-            clearInterval(interval);
-            setIsRenderingVideo(false);
-            setVideoRenderingProgress(0);
-            let finalJob: QuoteJob | null = null;
-            setJob((prev) => {
-              const next = {
-                ...prev,
-                videoStatus: "READY" as const,
-                status: "REVIEW" as JobStatus
-              };
-              finalJob = next;
-              return next;
-            });
-            notify("Vertical video compilation finished! Assigned to human review.", "success");
-            if (finalJob) {
-              await saveJobToDb(finalJob);
-            }
-          }
-        }, 150);
+        setIsSimulating(false);
+        notify("VIDEO_READY is reserved for a verified Stage 6 provider artifact. Review is never advanced automatically.", "info");
         return;
       } else if (job.status === "REVIEW") {
         setJob((prev) => {
@@ -419,35 +390,19 @@ export default function App() {
     }
   };
 
-  // Simulate generating final video on the video panel directly
+  const getStage6EntryBlocker = (candidate: QuoteJob): string | null => {
+    if (candidate.status !== "AUDIO_READY") return "Stage 6 requires workflow status AUDIO_READY.";
+    if (candidate.femaleVoice.status !== "GENERATED" || !candidate.femaleVoice.audioUrlOrRef) return "Stage 6 requires a generated Female audio artifact.";
+    if (candidate.maleVoice.status !== "GENERATED" || !candidate.maleVoice.audioUrlOrRef) return "Stage 6 requires a generated Male audio artifact.";
+    if (!candidate.stage6VisualRef) return "Stage 6 requires a server-owned visual source artifact.";
+    if (!candidate.voiceSourceTextSnapshot) return "Stage 6 requires the selected voice source text snapshot.";
+    return null;
+  };
+
+  // Stage 6 provider boundary is deliberately inactive until a real provider adapter is approved.
   const handleGenerateVideoDirectly = () => {
-    if (isRenderingVideo) return;
-    setIsRenderingVideo(true);
-    setJob(prev => ({ ...prev, videoStatus: "RENDERING" }));
-    let prog = 0;
-    const interval = setInterval(async () => {
-      prog += 20;
-      setVideoRenderingProgress(prog);
-      if (prog >= 100) {
-        clearInterval(interval);
-        setIsRenderingVideo(false);
-        setVideoRenderingProgress(0);
-        let finalJob: QuoteJob | null = null;
-        setJob((prev) => {
-          const next = {
-            ...prev,
-            videoStatus: "READY" as const,
-            status: "REVIEW" as JobStatus
-          };
-          finalJob = next;
-          return next;
-        });
-        notify("Video composed at 1080x1920 MP4 resolution. Ready for Review.", "success");
-        if (finalJob) {
-          await saveJobToDb(finalJob);
-        }
-      }
-    }, 200);
+    const blocker = getStage6EntryBlocker(jobRef.current);
+    notify(blocker || "Video provider integration is pending. No provider request or video artifact was created.", "info");
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -664,7 +619,28 @@ export default function App() {
       return;
     }
 
-    // 2. Set local selection and preview URL
+    let sourceRef: string;
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error("Unable to read the selected source file."));
+        reader.onload = () => resolve(String(reader.result));
+        reader.readAsDataURL(file);
+      });
+      const response = await fetch("/api/source-artifacts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileName: file.name, mimeType: file.type, dataBase64: dataUrl.split(",", 2)[1] })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.sourceRef) throw new Error(data.message || "Server did not return a durable visual source reference.");
+      sourceRef = data.sourceRef;
+    } catch (err: any) {
+      notify(`Source artifact upload failed: ${err.message || "unknown error"}`, "error");
+      return;
+    }
+
+    // 2. Set local preview; the persisted reference is server-owned, never this blob URL.
     setSelectedFile(file);
     const previewUrl = URL.createObjectURL(file);
     setSourcePreviewUrl(previewUrl);
@@ -680,16 +656,17 @@ export default function App() {
     const detectedType = isImage ? "image" : "video";
 
     // 3. Update the job metadata
-    const updatedJob: QuoteJob = {
+    const updatedJob: QuoteJob = invalidateVideo({
       ...job,
       sourceFilename: file.name,
       sourceType: detectedType,
       status: "NEW", // Reset status to NEW for frame extraction
-      sourceUrl: previewUrl, // Temporarily use original preview until extracted
+      sourceUrl: sourceRef,
+      stage6VisualRef: sourceRef,
       rawOcr: "", // Clear downstream raw OCR
       cleanText: "", // Clear downstream clean text
       coreMeaning: "" // Clear downstream core meaning
-    };
+    });
     
     // Clear failure details if resetting
     delete updatedJob.failedStage;
@@ -846,9 +823,29 @@ export default function App() {
     }
   };
 
-  // Helper to invalidate downstream scripts and voice slot states when upstream text changes
+  const invalidateVideo = (prevJob: QuoteJob): QuoteJob => ({
+    ...prevJob,
+    videoStatus: "PENDING",
+    videoUrlOrRef: null,
+    videoProvider: null,
+    videoEngine: null,
+    videoProviderTaskId: null,
+    videoProviderMimeType: null,
+    videoProviderFilename: null,
+    videoFileSizeBytes: null,
+    videoDurationMs: null,
+    videoWidth: null,
+    videoHeight: null,
+    videoFrameRate: null,
+    videoHasAudio: null,
+    videoFailureCode: null,
+    videoFailureMessage: null,
+    videoEstimatedCost: null
+  });
+
+  // Helper to invalidate downstream scripts, voice states, and stale Stage 6 output.
   const invalidateScriptsAndDownstream = (prevJob: QuoteJob): QuoteJob => {
-    return {
+    return invalidateVideo({
       ...prevJob,
       scripts: {
         scriptA: "",
@@ -871,7 +868,7 @@ export default function App() {
         durationMs: null
       },
       status: "TEXT_READY"
-    };
+    });
   };
 
   // Update handlers for edited values
@@ -1305,7 +1302,7 @@ export default function App() {
         (variant === "scriptB" && prev.voiceSourceType === "SCRIPT_B") ||
         (variant === "scriptC" && prev.voiceSourceType === "SCRIPT_C");
 
-      const next = {
+      const next = invalidateVideo({
         ...prev,
         scripts: {
           ...prev.scripts,
@@ -1326,7 +1323,7 @@ export default function App() {
           audioUrlOrRef: null,
           durationMs: null
         }
-      };
+      });
       setHasUnsavedChanges(true);
       return next;
     });
@@ -1340,7 +1337,7 @@ export default function App() {
       else if (sourceType === "SCRIPT_C") sourceText = prev.scripts.scriptC;
       else if (sourceType === "CLEAN_TEXT") sourceText = prev.cleanText;
 
-      const next: QuoteJob = {
+      const next: QuoteJob = invalidateVideo({
         ...prev,
         voiceSourceType: sourceType,
         voiceSourceTextSnapshot: sourceText,
@@ -1358,7 +1355,7 @@ export default function App() {
           audioUrlOrRef: null,
           durationMs: null
         }
-      };
+      });
       setHasUnsavedChanges(true);
 
       if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
@@ -1475,7 +1472,7 @@ export default function App() {
       const data = await response.json();
 
       setJob((prev) => {
-        const nextJob = { ...prev };
+        const nextJob = invalidateVideo({ ...prev });
         
         if (slot === "female") {
           nextJob.femaleVoice = {
@@ -1531,7 +1528,7 @@ export default function App() {
       notify(`Synthesis Error: ${errMsg}`, "error");
 
       setJob((prev) => {
-        const nextJob = { ...prev };
+        const nextJob = invalidateVideo({ ...prev });
         if (slot === "female") {
           nextJob.femaleVoice = { ...nextJob.femaleVoice, status: "FAILED" };
         } else {
@@ -1663,9 +1660,9 @@ export default function App() {
 
             <button
               onClick={runNextPipelineStep}
-              disabled={isSimulating || isRenderingVideo}
+              disabled={isSimulating}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center space-x-1.5 text-white transition cursor-pointer ${
-                isSimulating || isRenderingVideo
+                isSimulating
                   ? "bg-slate-300 cursor-not-allowed"
                   : "bg-blue-600 hover:bg-blue-700 active:bg-blue-800"
               }`}
@@ -3077,49 +3074,19 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                         1080 x 1920
                       </div>
 
-                      {/* Mock Video Stream / Rendering State Overlay */}
-                      {isRenderingVideo ? (
-                        <div className="absolute inset-0 z-15 bg-slate-950/95 flex flex-col items-center justify-center text-center p-4">
-                          <div className="relative h-10 w-10 flex items-center justify-center">
-                            <span className="absolute animate-ping inline-flex h-6 w-6 rounded-full bg-blue-400 opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-6 w-6 bg-blue-600"></span>
-                          </div>
-                          <p className="text-white text-[11px] font-bold mt-4 tracking-wider">Compiling Frame Layers...</p>
-                          <div className="w-4/5 bg-slate-800 h-1 rounded-full mt-2 overflow-hidden">
-                            <div className="bg-blue-500 h-full transition-all duration-150" style={{ width: `${videoRenderingProgress}%` }} />
-                          </div>
-                          <span className="text-slate-400 text-[9px] mt-1 font-mono">{videoRenderingProgress}%</span>
-                        </div>
-                      ) : job.videoStatus === "READY" ? (
-                        /* When composed and ready, display standard mockup stream */
+                      {job.videoStatus === "READY" && job.videoUrlOrRef ? (
+                        /* Preview is available only for a persisted provider artifact. */
                         <div className="absolute inset-0 z-10 overflow-hidden">
                           {playingVideo ? (
                             <video
-                              src={job.videoUrl}
+                              src={job.videoUrlOrRef}
                               autoPlay
                               loop
                               muted
                               className="w-full h-full object-cover"
                               referrerPolicy="no-referrer"
                             />
-                          ) : (
-                            <img
-                              src={job.sourceUrl}
-                              alt="Generated frame composite"
-                              className="w-full h-full object-cover brightness-75"
-                              referrerPolicy="no-referrer"
-                            />
-                          )}
-
-                          {/* Dynamic Subtitles overlay on vertical mockup */}
-                          <div className="absolute inset-x-4 bottom-1/3 text-center z-15">
-                            <span className="bg-yellow-400 text-slate-950 font-black tracking-wide text-[10px] px-1.5 py-0.5 rounded shadow-sm uppercase font-sans border border-slate-950 inline-block rotate-[-1deg]">
-                              THE BIGGEST RISK
-                            </span>
-                            <span className="block text-white font-extrabold text-[10px] mt-1.5 tracking-tight drop-shadow-[0_2px_2px_rgba(0,0,0,0.8)]">
-                              "is not taking any risk!"
-                            </span>
-                          </div>
+                          ) : <video src={job.videoUrlOrRef} muted className="w-full h-full object-cover" />}
 
                           {/* Player controller layout on preview */}
                           <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/45 transition-colors duration-150">
@@ -3136,11 +3103,11 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                           </div>
                         </div>
                       ) : (
-                        /* Unrendered initial state placeholder */
+                        /* No preview exists until a provider writes a verified artifact. */
                         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center text-center p-4 bg-slate-950">
                           <Video className="h-6 w-6 text-slate-600 mb-2" />
-                          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Composition Pending</p>
-                          <p className="text-[9px] text-slate-600 mt-1 leading-relaxed">Requires audio generated slots before assembly.</p>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Provider Integration Pending</p>
+                          <p className="text-[9px] text-slate-600 mt-1 leading-relaxed">A preview appears only after a verified video artifact is persisted.</p>
                         </div>
                       )}
 
@@ -3174,11 +3141,11 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                           </div>
                           <div>
                             <span className="text-slate-400 block font-medium">Audio Mix:</span>
-                            <span className="font-bold text-slate-700">V1 Stereo Mix</span>
+                            <span className="font-bold text-slate-700">Provider-defined when verified</span>
                           </div>
                           <div>
                             <span className="text-slate-400 block font-medium">Subtitle Rendering:</span>
-                            <span className="font-bold text-slate-700">Overlay Burn-in Subtitles</span>
+                            <span className="font-bold text-slate-700">Provider-defined when verified</span>
                           </div>
                         </div>
                       </div>
@@ -3187,10 +3154,12 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                         <span className="block text-[10px] font-black text-slate-400 uppercase tracking-widest">Video Generation Status</span>
                         <div className="flex items-center space-x-2">
                           <span className={`h-2 w-2 rounded-full ${
-                            job.videoStatus === "READY" 
+                            job.videoStatus === "READY"
                               ? "bg-emerald-500" 
-                              : job.videoStatus === "RENDERING" 
+                            : job.videoStatus === "RENDERING"
                               ? "bg-amber-500 animate-pulse" 
+                            : job.videoStatus === "FAILED"
+                              ? "bg-rose-500"
                               : "bg-slate-400"
                           }`} />
                           <span className="text-xs font-bold text-slate-800 uppercase font-mono tracking-wider">
@@ -3198,7 +3167,7 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                           </span>
                         </div>
                         <p className="text-[11px] text-slate-500 leading-relaxed">
-                          Compiling builds a high-definition video using raw source video clips, layered voice outputs, and animated canvas subtitle scripts.
+                          {job.videoStatus === "FAILED" ? (job.videoFailureMessage || "The most recent video attempt failed. Retry is available when a provider adapter is configured.") : "Provider integration is pending. No video is generated until a future approved provider returns a verified artifact."}
                         </p>
                       </div>
 
@@ -3211,26 +3180,25 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                           </div>
                           <div className="min-w-0 flex-1">
                             <p className="text-xs font-mono text-slate-700 truncate font-bold">
-                              {job.videoStatus === "READY" ? `output_q000001_v1_burn.mp4` : "Pending synthesis output..."}
+                              {job.videoStatus === "READY" && job.videoUrlOrRef ? (job.videoProviderFilename || job.videoUrlOrRef) : "No verified video artifact"}
                             </p>
                             <p className="text-[10px] text-slate-400 font-medium">
-                              {job.videoStatus === "READY" ? "Size: 4.8 MB — 1080x1920 MP4" : "0.00 MB"}
+                              {job.videoStatus === "READY" && job.videoUrlOrRef ? `Size: ${job.videoFileSizeBytes ?? "unknown"} bytes` : "Provider integration pending"}
                             </p>
                           </div>
                         </div>
                       </div>
                     </div>
 
-                    {/* Direct Compilation Action Controls */}
                     <div className="pt-2">
                       <button
                         onClick={handleGenerateVideoDirectly}
-                        disabled={isRenderingVideo || job.videoStatus === "RENDERING"}
+                        disabled={!!getStage6EntryBlocker(job) || job.videoStatus === "RENDERING"}
                         className="w-full bg-slate-900 hover:bg-slate-800 text-white font-black py-2.5 px-4 rounded-lg text-[10px] uppercase tracking-widest transition flex items-center justify-center space-x-2 shadow-xs cursor-pointer disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed"
                         id="btn-generate-final-video"
                       >
                         <Video className="h-4 w-4" />
-                        <span>{isRenderingVideo ? "Compiling MP4 Layer..." : "Generate Final Video (Assemble)"}</span>
+                        <span>{getStage6EntryBlocker(job) || "Provider Integration Pending"}</span>
                       </button>
                     </div>
 
@@ -3393,28 +3361,6 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                       id="btn-set-audio-ready"
                     >
                       AUDIO_READY
-                    </button>
-                    <button
-                      onClick={() => setJobStatusDirectly("VIDEO_READY")}
-                      className={`p-2 rounded-lg border text-left font-mono font-bold transition cursor-pointer ${
-                        job.status === "VIDEO_READY" 
-                          ? "bg-blue-50 border-blue-200 text-blue-700 shadow-xs" 
-                          : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
-                      }`}
-                      id="btn-set-video-ready"
-                    >
-                      VIDEO_READY
-                    </button>
-                    <button
-                      onClick={() => setJobStatusDirectly("REVIEW")}
-                      className={`p-2 rounded-lg border text-left font-mono font-bold transition cursor-pointer ${
-                        job.status === "REVIEW" 
-                          ? "bg-blue-50 border-blue-200 text-blue-700 shadow-xs" 
-                          : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
-                      }`}
-                      id="btn-set-review"
-                    >
-                      REVIEW
                     </button>
                     <button
                       onClick={() => setJobStatusDirectly("COMPLETED")}

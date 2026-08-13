@@ -66,6 +66,27 @@ export interface QuoteJobRow {
   last_voice_latency_ms?: number | null;
   cumulative_voice_characters?: number;
   voice_estimated_cost?: number | null;
+  // Build 8 Stage 6 Video Foundation Columns
+  stage6_visual_ref?: string | null;
+  video_status?: string | null;
+  video_url_or_ref?: string | null;
+  video_provider?: string | null;
+  video_engine?: string | null;
+  video_provider_task_id?: string | null;
+  video_process_run_count?: number;
+  video_last_processed_at?: string | null;
+  video_last_latency_ms?: number | null;
+  video_provider_mime_type?: string | null;
+  video_provider_filename?: string | null;
+  video_file_size_bytes?: number | null;
+  video_duration_ms?: number | null;
+  video_width?: number | null;
+  video_height?: number | null;
+  video_frame_rate?: number | null;
+  video_has_audio?: boolean | null;
+  video_failure_code?: string | null;
+  video_failure_message?: string | null;
+  video_estimated_cost?: number | null;
 }
 
 export function mapRowToJob(row: QuoteJobRow): QuoteJob {
@@ -75,6 +96,7 @@ export function mapRowToJob(row: QuoteJobRow): QuoteJob {
     sourceFilename: row.source_filename,
     sourceType: row.source_type as "image" | "video",
     sourceUrl: "https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&q=80&w=1080",
+    stage6VisualRef: row.stage6_visual_ref || null,
     rawOcr: row.raw_ocr_text,
     cleanText: row.clean_text,
     coreMeaning: row.core_meaning,
@@ -101,8 +123,25 @@ export function mapRowToJob(row: QuoteJobRow): QuoteJob {
       audioUrlOrRef: row.male_audio_url_or_ref || null,
       durationMs: row.male_duration_ms || null
     },
-    videoStatus: "READY",
-    videoUrl: "https://assets.mixkit.co/videos/preview/mixkit-forest-stream-in-the-sunlight-529-large.mp4",
+    videoStatus: (row.video_status as QuoteJob["videoStatus"]) || "PENDING",
+    videoUrlOrRef: row.video_url_or_ref || null,
+    videoProvider: row.video_provider || null,
+    videoEngine: row.video_engine || null,
+    videoProviderTaskId: row.video_provider_task_id || null,
+    videoProcessRunCount: row.video_process_run_count ?? 0,
+    videoLastProcessedAt: row.video_last_processed_at || null,
+    videoLastLatencyMs: row.video_last_latency_ms || null,
+    videoProviderMimeType: row.video_provider_mime_type || null,
+    videoProviderFilename: row.video_provider_filename || null,
+    videoFileSizeBytes: row.video_file_size_bytes || null,
+    videoDurationMs: row.video_duration_ms || null,
+    videoWidth: row.video_width || null,
+    videoHeight: row.video_height || null,
+    videoFrameRate: row.video_frame_rate || null,
+    videoHasAudio: row.video_has_audio ?? null,
+    videoFailureCode: row.video_failure_code || null,
+    videoFailureMessage: row.video_failure_message || null,
+    videoEstimatedCost: row.video_estimated_cost || null,
     failedStage: row.failed_stage || undefined,
     errorMessage: row.error_message || undefined,
     // Build 5 Observability & Accounting Patch Mappings
@@ -196,6 +235,27 @@ export function mapJobToRow(job: QuoteJob): QuoteJobRow {
     last_voice_latency_ms: job.lastVoiceLatencyMs || null,
     cumulative_voice_characters: job.cumulativeVoiceCharacters || 0,
     voice_estimated_cost: job.voiceEstimatedCost || null,
+    // Build 8 Stage 6 Video Foundation Mappings
+    stage6_visual_ref: job.stage6VisualRef || null,
+    video_status: job.videoStatus,
+    video_url_or_ref: job.videoUrlOrRef || null,
+    video_provider: job.videoProvider || null,
+    video_engine: job.videoEngine || null,
+    video_provider_task_id: job.videoProviderTaskId || null,
+    video_process_run_count: job.videoProcessRunCount || 0,
+    video_last_processed_at: job.videoLastProcessedAt || null,
+    video_last_latency_ms: job.videoLastLatencyMs || null,
+    video_provider_mime_type: job.videoProviderMimeType || null,
+    video_provider_filename: job.videoProviderFilename || null,
+    video_file_size_bytes: job.videoFileSizeBytes || null,
+    video_duration_ms: job.videoDurationMs || null,
+    video_width: job.videoWidth || null,
+    video_height: job.videoHeight || null,
+    video_frame_rate: job.videoFrameRate || null,
+    video_has_audio: job.videoHasAudio ?? null,
+    video_failure_code: job.videoFailureCode || null,
+    video_failure_message: job.videoFailureMessage || null,
+    video_estimated_cost: null,
   };
 }
 

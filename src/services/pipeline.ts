@@ -3,7 +3,6 @@ import {
   IMeaningService,
   IScriptService,
   IVoiceService,
-  IVideoService,
   ScriptVariants
 } from "../types";
 
@@ -67,23 +66,10 @@ export class MockVoiceService implements IVoiceService {
   }
 }
 
-export class MockVideoService implements IVideoService {
-  async composeVideo(params: {
-    sourceUrl: string;
-    script: string;
-    audioUrl: string;
-    format: "1080x1920";
-  }): Promise<string> {
-    await new Promise((resolve) => setTimeout(resolve, 2500));
-    return "https://assets.mixkit.co/videos/preview/mixkit-forest-stream-in-the-sunlight-529-large.mp4";
-  }
-}
-
 // Global service provider to resemble clean framework setups
 export const services = {
   ocr: new MockOcrService(),
   meaning: new MockMeaningService(),
   script: new RealScriptService(),
-  voice: new MockVoiceService(),
-  video: new MockVideoService()
+  voice: new MockVoiceService()
 };

@@ -5,5 +5,7 @@ coverage/
 .DS_Store
 *.log
 audio/
+video/
+source/
 .env*
 !.env.example
