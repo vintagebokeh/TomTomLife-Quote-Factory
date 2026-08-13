@@ -16,6 +16,7 @@ interface VideoGenerationRequest {
   maleAudioStatus?: unknown;
   femaleAudioRef?: unknown;
   maleAudioRef?: unknown;
+  videoProcessRunCount?: unknown;
 }
 
 interface VideoGenerationResult {
@@ -33,12 +34,38 @@ interface VideoGenerationResult {
   frameRate?: number | null;
   hasAudio?: boolean | null;
   latencyMs?: number | null;
+  processedAt?: string | null;
   failureCode?: string | null;
   failureMessage?: string | null;
 }
 
+interface ManusAttachment {
+  type?: string;
+  content_type?: string;
+  filename?: string;
+  url?: string;
+}
+
+class Stage6Error extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly statusCode = 502,
+    public readonly taskId: string | null = null
+  ) {
+    super(message);
+  }
+}
+
+const MANUS_API_BASE = "https://api.manus.ai/v2";
+const MANUS_AGENT_PROFILE = "manus-1.6-lite";
+const MANUS_POLL_INTERVAL_MS = 3000;
+const MANUS_POLL_TIMEOUT_MS = 5 * 60 * 1000;
+
+const sleep = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
 const inspectVideoArtifact = (filePath: string): Promise<Record<string, unknown>> => new Promise((resolve) => {
-  execFile("ffprobe", ["-v", "error", "-show_entries", "format=duration,size:stream=codec_type,codec_name,width,height,r_frame_rate", "-of", "json", filePath], (error, stdout) => {
+  execFile("ffprobe", ["-v", "error", "-show_entries", "format=format_name,duration,size:stream=codec_type,codec_name,width,height,r_frame_rate", "-of", "json", filePath], (error, stdout) => {
     if (error) return resolve({ available: false, code: "FFPROBE_UNAVAILABLE", message: error.message });
     try {
       resolve({ available: true, ...(JSON.parse(stdout) as Record<string, unknown>) });
@@ -47,6 +74,91 @@ const inspectVideoArtifact = (filePath: string): Promise<Record<string, unknown>
     }
   });
 });
+
+const getManusError = (payload: any, fallback: string) => payload?.error?.message || payload?.message || fallback;
+
+const buildManusVideoPrompt = (request: Required<Pick<VideoGenerationRequest, "voiceSourceTextSnapshot" | "language">>) =>
+  `Create exactly one short vertical 9:16 video. Use this approved ${request.language} narration as the creative source: "${request.voiceSourceTextSnapshot}". Return one provider-generated primary MP4 video artifact. Do not create additional videos.`;
+
+const collectAttachments = (messages: any[]): ManusAttachment[] => messages.flatMap((message) => [
+  ...(Array.isArray(message?.assistant_message?.attachments) ? message.assistant_message.attachments : []),
+  ...(Array.isArray(message?.user_message?.attachments) ? message.user_message.attachments : [])
+]);
+
+const getLatestAgentStatus = (messages: any[]): string | null => {
+  const statusUpdate = messages.find((message) => message?.status_update?.agent_status);
+  return typeof statusUpdate?.status_update?.agent_status === "string" ? statusUpdate.status_update.agent_status : null;
+};
+
+const getProviderFailure = (messages: any[]): string | null => {
+  const failure = messages.find((message) => message?.error_message?.content);
+  return typeof failure?.error_message?.content === "string" ? failure.error_message.content : null;
+};
+
+const isOwnedArtifactRef = (reference: unknown, routePrefix: string, directory: string): boolean => {
+  if (typeof reference !== "string" || !reference.startsWith(`${routePrefix}/`)) return false;
+  const filename = path.basename(reference);
+  return reference === `${routePrefix}/${filename}` && fs.existsSync(path.join(directory, filename));
+};
+
+const pollManusTask = async (apiKey: string, taskId: string): Promise<ManusAttachment[]> => {
+  const deadline = Date.now() + MANUS_POLL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const query = new URLSearchParams({ task_id: taskId, order: "desc", limit: "100" });
+    const response = await fetch(`${MANUS_API_BASE}/task.listMessages?${query}`, { headers: { "x-manus-api-key": apiKey } });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.ok === false) {
+      throw new Stage6Error("MANUS_POLL_FAILED", getManusError(payload, `Manus polling failed (${response.status}).`), 502, taskId);
+    }
+
+    const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+    const status = getLatestAgentStatus(messages);
+    if (status === "error" || status === "failed") {
+      throw new Stage6Error("MANUS_TASK_FAILED", getProviderFailure(messages) || "Manus reported a task failure.", 502, taskId);
+    }
+    if (status === "stopped") return collectAttachments(messages);
+    if (status && status !== "running") {
+      throw new Stage6Error("MANUS_TASK_UNSUPPORTED_STATUS", `Manus task entered unsupported status: ${status}.`, 502, taskId);
+    }
+    await sleep(MANUS_POLL_INTERVAL_MS);
+  }
+  throw new Stage6Error("MANUS_POLL_TIMEOUT", "Manus task did not complete before the Stage 6 polling timeout.", 504, taskId);
+};
+
+const parseFrameRate = (value: unknown): number | null => {
+  if (typeof value !== "string") return null;
+  const [numerator, denominator] = value.split("/").map(Number);
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) return null;
+  return numerator / denominator;
+};
+
+const validateDownloadedVideo = async (filePath: string, expectedMimeType: string): Promise<Omit<VideoGenerationResult, "status" | "provider" | "engine" | "providerTaskId" | "videoUrlOrRef" | "filename" | "latencyMs" | "processedAt">> => {
+  if (!expectedMimeType.toLowerCase().startsWith("video/")) throw new Stage6Error("UNSUPPORTED_PROVIDER_VIDEO_MIME", "Manus did not return a supported video MIME type.");
+  const probe = await inspectVideoArtifact(filePath);
+  if (probe.available !== true) throw new Stage6Error(String(probe.code || "FFPROBE_FAILED"), String(probe.message || "Unable to inspect downloaded video."));
+
+  const streams = Array.isArray(probe.streams) ? probe.streams as Array<Record<string, unknown>> : [];
+  const videoStream = streams.find((stream) => stream.codec_type === "video");
+  const audioStream = streams.find((stream) => stream.codec_type === "audio");
+  const format = (probe.format || {}) as Record<string, unknown>;
+  const durationMs = Math.round(Number(format.duration) * 1000);
+  const width = Number(videoStream?.width);
+  const height = Number(videoStream?.height);
+  const fileSizeBytes = fs.statSync(filePath).size;
+  if (!videoStream || !videoStream.codec_name || !Number.isFinite(durationMs) || durationMs <= 0 || !Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0 || fileSizeBytes <= 0) {
+    throw new Stage6Error("INVALID_VIDEO_ARTIFACT", "Downloaded Manus artifact is not a valid playable video.");
+  }
+
+  return {
+    mimeType: expectedMimeType,
+    fileSizeBytes,
+    durationMs,
+    width,
+    height,
+    frameRate: parseFrameRate(videoStream.r_frame_rate),
+    hasAudio: !!audioStream
+  };
+};
 
 async function startServer() {
   const app = express();
@@ -738,32 +850,104 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
     }
   });
 
-  // Stage 6 provider-neutral boundary. A future adapter may read MANUS_API_KEY here on the server only.
-  app.post("/api/generate-video", (req, res) => {
+  // Stage 6 Manus adapter. All provider credentials, polling, downloads, and validation remain server-side.
+  app.post("/api/generate-video", async (req, res) => {
     const request = (req.body || {}) as VideoGenerationRequest;
     const entryErrors: string[] = [];
     if (request.jobStatus !== "AUDIO_READY") entryErrors.push("jobStatus must be AUDIO_READY");
     if (typeof request.contentId !== "string" || !request.contentId) entryErrors.push("contentId is required");
-    if (typeof request.visualRef !== "string" || !request.visualRef.startsWith("/source/")) entryErrors.push("visualRef must be a server-owned /source/ reference");
+    if (!isOwnedArtifactRef(request.visualRef, "/source", sourceDir)) entryErrors.push("visualRef must be an existing server-owned /source/ reference");
     if (typeof request.voiceSourceTextSnapshot !== "string" || !request.voiceSourceTextSnapshot.trim()) entryErrors.push("voiceSourceTextSnapshot is required");
     if (typeof request.language !== "string" || !request.language) entryErrors.push("language is required");
     if (request.femaleAudioStatus !== "GENERATED") entryErrors.push("femaleAudioStatus must be GENERATED");
     if (request.maleAudioStatus !== "GENERATED") entryErrors.push("maleAudioStatus must be GENERATED");
-    if (typeof request.femaleAudioRef !== "string" || !request.femaleAudioRef.startsWith("/audio/")) entryErrors.push("femaleAudioRef must be a server-owned /audio/ reference");
-    if (typeof request.maleAudioRef !== "string" || !request.maleAudioRef.startsWith("/audio/")) entryErrors.push("maleAudioRef must be a server-owned /audio/ reference");
+    if (!isOwnedArtifactRef(request.femaleAudioRef, "/audio", audioDir)) entryErrors.push("femaleAudioRef must be an existing server-owned /audio/ reference");
+    if (!isOwnedArtifactRef(request.maleAudioRef, "/audio", audioDir)) entryErrors.push("maleAudioRef must be an existing server-owned /audio/ reference");
 
     if (entryErrors.length) {
       return res.status(400).json({ error: "INVALID_STAGE6_INPUT", message: "Stage 6 entry contract rejected.", details: entryErrors });
     }
 
-    const result: VideoGenerationResult = {
-      status: "FAILED",
-      provider: "not-configured",
-      engine: "not-configured",
-      failureCode: "VIDEO_PROVIDER_NOT_CONFIGURED",
-      failureMessage: "No Stage 6 video provider adapter is configured. No provider request or video artifact was created."
-    };
-    return res.status(501).json({ error: result.failureCode, message: result.failureMessage, result });
+    const apiKey = process.env.MANUS_API_KEY;
+    if (!apiKey) {
+      return res.status(503).json({
+        error: "VIDEO_PROVIDER_NOT_CONFIGURED",
+        message: "Manus video provider is not configured on this server.",
+        result: { status: "FAILED", provider: "manus", engine: MANUS_AGENT_PROFILE, failureCode: "VIDEO_PROVIDER_NOT_CONFIGURED", failureMessage: "Manus video provider is not configured on this server." }
+      });
+    }
+
+    const startedAt = new Date().toISOString();
+    const startedAtMs = Date.now();
+    const videoProcessRunCount = (typeof request.videoProcessRunCount === "number" ? request.videoProcessRunCount : 0) + 1;
+    let taskId: string | null = null;
+    let outputPath: string | null = null;
+
+    try {
+      const prompt = buildManusVideoPrompt({ voiceSourceTextSnapshot: request.voiceSourceTextSnapshot as string, language: request.language as string });
+      const createResponse = await fetch(`${MANUS_API_BASE}/task.create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-manus-api-key": apiKey },
+        body: JSON.stringify({
+          message: { content: [{ type: "text", text: prompt }] },
+          agent_profile: MANUS_AGENT_PROFILE,
+          interactive_mode: false,
+          share_visibility: "private",
+          title: `TomTomLife Stage 6 ${request.contentId}`
+        })
+      });
+      const createPayload = await createResponse.json().catch(() => ({}));
+      if (!createResponse.ok || createPayload?.ok === false || typeof createPayload?.task_id !== "string") {
+        throw new Stage6Error("MANUS_TASK_CREATE_FAILED", getManusError(createPayload, `Manus task creation failed (${createResponse.status}).`));
+      }
+      taskId = createPayload.task_id;
+
+      const attachments = await pollManusTask(apiKey, taskId);
+      const primaryVideo = attachments.find((attachment) => typeof attachment.content_type === "string" && attachment.content_type.toLowerCase().startsWith("video/") && typeof attachment.url === "string");
+      if (!primaryVideo) throw new Stage6Error("MANUS_VIDEO_ATTACHMENT_MISSING", "Manus completed the task without a supported video attachment.", 502, taskId);
+
+      const downloadResponse = await fetch(primaryVideo.url!);
+      if (!downloadResponse.ok) throw new Stage6Error("MANUS_VIDEO_DOWNLOAD_FAILED", `Unable to download the selected Manus video artifact (${downloadResponse.status}).`, 502, taskId);
+      const downloadedBytes = Buffer.from(await downloadResponse.arrayBuffer());
+      if (!downloadedBytes.length) throw new Stage6Error("MANUS_VIDEO_DOWNLOAD_FAILED", "Selected Manus video artifact was empty.", 502, taskId);
+
+      const safeProviderFilename = path.basename(primaryVideo.filename || "manus-video.mp4").replace(/[^a-zA-Z0-9._-]/g, "_");
+      const filename = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}_${safeProviderFilename}`;
+      outputPath = path.join(videoDir, filename);
+      fs.writeFileSync(outputPath, downloadedBytes);
+
+      const metadata = await validateDownloadedVideo(outputPath, primaryVideo.content_type!);
+      const processedAt = new Date().toISOString();
+      const result: VideoGenerationResult = {
+        status: "READY",
+        provider: "manus",
+        engine: MANUS_AGENT_PROFILE,
+        providerTaskId: taskId,
+        videoUrlOrRef: `/video/${filename}`,
+        filename: primaryVideo.filename || safeProviderFilename,
+        latencyMs: Date.now() - startedAtMs,
+        processedAt,
+        ...metadata
+      };
+      return res.json({ result, videoProcessRunCount, videoStartedAt: startedAt });
+    } catch (error: any) {
+      if (outputPath && fs.existsSync(outputPath)) {
+        try { fs.unlinkSync(outputPath); } catch { /* preserve the structured provider failure response */ }
+      }
+      const failure = error instanceof Stage6Error ? error : new Stage6Error("MANUS_ADAPTER_ERROR", error?.message || "Unexpected Stage 6 provider failure.", 502, taskId);
+      const processedAt = new Date().toISOString();
+      const result: VideoGenerationResult = {
+        status: "FAILED",
+        provider: "manus",
+        engine: MANUS_AGENT_PROFILE,
+        providerTaskId: failure.taskId || taskId,
+        latencyMs: Date.now() - startedAtMs,
+        processedAt,
+        failureCode: failure.code,
+        failureMessage: failure.message
+      };
+      return res.status(failure.statusCode).json({ error: failure.code, message: failure.message, result, videoProcessRunCount, videoStartedAt: startedAt });
+    }
   });
 
   // Catch JSON syntax errors from body parser before they propagate to static fallback

@@ -22,7 +22,7 @@ import {
   UploadCloud,
   Activity
 } from "lucide-react";
-import { QuoteJob, JobStatus, ScriptVariants } from "./types";
+import { QuoteJob, JobStatus, ScriptVariants, VideoGenerationRequest, VideoGenerationResult } from "./types";
 import { initialMockJob } from "./mockData";
 import { services } from "./services/pipeline";
 import { supabaseService } from "./services/supabaseService";
@@ -399,10 +399,104 @@ export default function App() {
     return null;
   };
 
-  // Stage 6 provider boundary is deliberately inactive until a real provider adapter is approved.
-  const handleGenerateVideoDirectly = () => {
-    const blocker = getStage6EntryBlocker(jobRef.current);
-    notify(blocker || "Video provider integration is pending. No provider request or video artifact was created.", "info");
+  const handleGenerateVideoDirectly = async () => {
+    const sourceJob = jobRef.current;
+    const blocker = getStage6EntryBlocker(sourceJob);
+    if (blocker) {
+      notify(blocker, "error");
+      return;
+    }
+
+    const request: VideoGenerationRequest = {
+      contentId: sourceJob.contentId,
+      jobStatus: sourceJob.status,
+      visualRef: sourceJob.stage6VisualRef!,
+      voiceSourceTextSnapshot: sourceJob.voiceSourceTextSnapshot!,
+      language: sourceJob.language || "en",
+      femaleAudioStatus: "GENERATED",
+      maleAudioStatus: "GENERATED",
+      femaleAudioRef: sourceJob.femaleVoice.audioUrlOrRef!,
+      maleAudioRef: sourceJob.maleVoice.audioUrlOrRef!,
+      videoProcessRunCount: sourceJob.videoProcessRunCount || 0
+    };
+
+    const renderingJob: QuoteJob = {
+      ...sourceJob,
+      videoStatus: "RENDERING",
+      videoProvider: "manus",
+      videoEngine: "manus-1.6-lite",
+      videoFailureCode: null,
+      videoFailureMessage: null,
+      videoEstimatedCost: null
+    };
+    setJob(renderingJob);
+    await saveJobToDb(renderingJob);
+    notify("Manus video generation is running asynchronously. Duplicate submission is disabled.", "info");
+
+    try {
+      const response = await fetch("/api/generate-video", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request)
+      });
+      const data = await response.json().catch(() => ({}));
+      const result = data.result as VideoGenerationResult | undefined;
+      const currentJob = jobRef.current;
+      const inputChanged = currentJob.stage6VisualRef !== request.visualRef || currentJob.voiceSourceTextSnapshot !== request.voiceSourceTextSnapshot || currentJob.femaleVoice.audioUrlOrRef !== request.femaleAudioRef || currentJob.maleVoice.audioUrlOrRef !== request.maleAudioRef;
+      if (inputChanged) {
+        notify("Stage 6 result was ignored because canonical inputs changed during rendering.", "info");
+        return;
+      }
+      if (!response.ok || !result || result.status !== "READY" || !result.videoUrlOrRef) {
+        throw Object.assign(new Error(data.message || result?.failureMessage || `Stage 6 provider returned ${response.status}.`), { data, result });
+      }
+
+      const readyJob: QuoteJob = {
+        ...currentJob,
+        status: "VIDEO_READY",
+        videoStatus: "READY",
+        videoUrlOrRef: result.videoUrlOrRef,
+        videoProvider: result.provider,
+        videoEngine: result.engine,
+        videoProviderTaskId: result.providerTaskId || null,
+        videoProcessRunCount: typeof data.videoProcessRunCount === "number" ? data.videoProcessRunCount : currentJob.videoProcessRunCount,
+        videoLastProcessedAt: result.processedAt || new Date().toISOString(),
+        videoLastLatencyMs: result.latencyMs ?? null,
+        videoProviderMimeType: result.mimeType || null,
+        videoProviderFilename: result.filename || null,
+        videoFileSizeBytes: result.fileSizeBytes ?? null,
+        videoDurationMs: result.durationMs ?? null,
+        videoWidth: result.width ?? null,
+        videoHeight: result.height ?? null,
+        videoFrameRate: result.frameRate ?? null,
+        videoHasAudio: result.hasAudio ?? null,
+        videoFailureCode: null,
+        videoFailureMessage: null,
+        videoEstimatedCost: null
+      };
+      setJob(readyJob);
+      await saveJobToDb(readyJob);
+      notify("Manus video validated and stored locally. Ready for human review when separately requested.", "success");
+    } catch (error: any) {
+      const result = error.result || error.data?.result as VideoGenerationResult | undefined;
+      const currentJob = jobRef.current;
+      const failedJob: QuoteJob = {
+        ...currentJob,
+        videoStatus: "FAILED",
+        videoProvider: result?.provider || "manus",
+        videoEngine: result?.engine || "manus-1.6-lite",
+        videoProviderTaskId: result?.providerTaskId || currentJob.videoProviderTaskId || null,
+        videoProcessRunCount: typeof error.data?.videoProcessRunCount === "number" ? error.data.videoProcessRunCount : currentJob.videoProcessRunCount,
+        videoLastProcessedAt: result?.processedAt || new Date().toISOString(),
+        videoLastLatencyMs: result?.latencyMs ?? null,
+        videoFailureCode: result?.failureCode || error.data?.error || "MANUS_ADAPTER_ERROR",
+        videoFailureMessage: result?.failureMessage || error.message || "Stage 6 video generation failed.",
+        videoEstimatedCost: null
+      };
+      setJob(failedJob);
+      await saveJobToDb(failedJob);
+      notify(`Video generation failed: ${failedJob.videoFailureMessage}`, "error");
+    }
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -3167,7 +3261,13 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                           </span>
                         </div>
                         <p className="text-[11px] text-slate-500 leading-relaxed">
-                          {job.videoStatus === "FAILED" ? (job.videoFailureMessage || "The most recent video attempt failed. Retry is available when a provider adapter is configured.") : "Provider integration is pending. No video is generated until a future approved provider returns a verified artifact."}
+                          {job.videoStatus === "FAILED"
+                            ? (job.videoFailureMessage || "The most recent video attempt failed. Retry is available.")
+                            : job.videoStatus === "RENDERING"
+                              ? "Manus task creation, polling, download, and local validation are in progress."
+                              : job.videoStatus === "READY"
+                                ? "Verified Manus artifact stored under the local /video route."
+                                : "Ready for an operator-triggered Manus generation once all Stage 6 inputs are present."}
                         </p>
                       </div>
 
@@ -3183,7 +3283,7 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                               {job.videoStatus === "READY" && job.videoUrlOrRef ? (job.videoProviderFilename || job.videoUrlOrRef) : "No verified video artifact"}
                             </p>
                             <p className="text-[10px] text-slate-400 font-medium">
-                              {job.videoStatus === "READY" && job.videoUrlOrRef ? `Size: ${job.videoFileSizeBytes ?? "unknown"} bytes` : "Provider integration pending"}
+                              {job.videoStatus === "READY" && job.videoUrlOrRef ? `Size: ${job.videoFileSizeBytes ?? "unknown"} bytes — ${job.videoWidth ?? "?"}x${job.videoHeight ?? "?"} — ${job.videoDurationMs ?? "?"} ms` : "No verified provider output"}
                             </p>
                           </div>
                         </div>
@@ -3198,7 +3298,7 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                         id="btn-generate-final-video"
                       >
                         <Video className="h-4 w-4" />
-                        <span>{getStage6EntryBlocker(job) || "Provider Integration Pending"}</span>
+                        <span>{getStage6EntryBlocker(job) || (job.videoStatus === "RENDERING" ? "Generating Manus Video..." : job.videoStatus === "FAILED" ? "Retry Manus Video Generation" : "Generate Manus Video")}</span>
                       </button>
                     </div>
 

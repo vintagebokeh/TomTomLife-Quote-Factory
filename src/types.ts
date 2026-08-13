@@ -137,6 +137,7 @@ export interface VideoGenerationRequest {
   maleAudioStatus: "GENERATED";
   femaleAudioRef: string;
   maleAudioRef: string;
+  videoProcessRunCount: number;
 }
 
 export interface VideoGenerationResult {
@@ -154,6 +155,7 @@ export interface VideoGenerationResult {
   frameRate?: number | null;
   hasAudio?: boolean | null;
   latencyMs?: number | null;
+  processedAt?: string | null;
   failureCode?: string | null;
   failureMessage?: string | null;
 }
