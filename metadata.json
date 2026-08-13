@@ -1,0 +1,6 @@
+{
+  "name": "TomTomLife-Quote-Factory",
+  "description": "Production workspace for Quote-to-Video generation pipeline V1.0.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
