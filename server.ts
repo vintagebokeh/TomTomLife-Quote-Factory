@@ -2,6 +2,7 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
+import fs from "fs";
 
 async function startServer() {
   const app = express();
@@ -9,6 +10,14 @@ async function startServer() {
 
   // Set up standard JSON parser with a generous size limit for base64 frames
   app.use(express.json({ limit: "50mb" }));
+
+  // Create audio directory if it doesn't exist
+  const audioDir = path.join(process.cwd(), "audio");
+  if (!fs.existsSync(audioDir)) {
+    fs.mkdirSync(audioDir, { recursive: true });
+  }
+  // Serve audio folder statically
+  app.use("/audio", express.static(audioDir));
 
   // Endpoint to check configuration status
   app.get("/api/config-status", (req, res) => {
@@ -446,6 +455,138 @@ Do NOT include any markdown code fences (like \`\`\`json), preambles, explanatio
       res.status(500).json({
         error: "Internal Server Error",
         message: err.message || "An unexpected error occurred during script generation.",
+        status: 500
+      });
+    }
+  });
+
+  // Stage 5 Voice Generation using Gemini API
+  app.post("/api/generate-voice", async (req, res) => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.status(503).json({
+          error: "NOT_CONFIGURED",
+          message: "Gemini API Key is not configured in environment variables."
+        });
+      }
+
+      const { text, language, slot, voiceId, voiceProcessRunCount, cumulativeVoiceCharacters } = req.body;
+      if (!text || typeof text !== "string" || text.trim() === "") {
+        return res.status(400).json({
+          error: "INVALID_INPUT",
+          message: "A non-empty string is required for the text parameter."
+        });
+      }
+
+      if (slot !== "female" && slot !== "male") {
+        return res.status(400).json({
+          error: "INVALID_INPUT",
+          message: "The slot parameter must be either 'female' or 'male'."
+        });
+      }
+
+      if (voiceId !== "Sulafat" && voiceId !== "Charon") {
+        return res.status(400).json({
+          error: "INVALID_INPUT",
+          message: "The voiceId parameter must be either 'Sulafat' or 'Charon'."
+        });
+      }
+
+      const startTime = Date.now();
+      const ai = new GoogleGenAI({ apiKey });
+
+      // Build the natural instruction based on language as requested
+      let ttsPrompt = text;
+      if (language === "th") {
+        ttsPrompt = `Please read the following text naturally in native Thai. Ensure natural rhythm and native Thai narration: ${text}`;
+      } else {
+        ttsPrompt = `Narrate the following text naturally: ${text}`;
+      }
+
+      // Invoke gemini-2.5-flash-preview-tts
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: ttsPrompt,
+        config: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: voiceId }
+            }
+          }
+        }
+      });
+
+      const base64Data = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (!base64Data) {
+        throw new Error("No inline audio data returned from the Gemini TTS provider.");
+      }
+
+      const returnedMime = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.mimeType || "audio/pcm;rate=24000";
+      let audioBuffer = Buffer.from(base64Data, "base64");
+      const isPcm = returnedMime.toLowerCase().includes("pcm");
+      let sampleRate = 24000;
+
+      if (isPcm) {
+        const match = returnedMime.match(/rate=(\d+)/);
+        if (match) {
+          sampleRate = parseInt(match[1], 10);
+        }
+
+        // Helper to wrap raw 16-bit PCM little-endian data into a browser-playable WAV container
+        const wrapPcmInWav = (pcmBuffer: Buffer, sRate: number): Buffer => {
+          const wavHeader = Buffer.alloc(44);
+          const dataLength = pcmBuffer.length;
+          
+          wavHeader.write("RIFF", 0);
+          wavHeader.writeUInt32LE(36 + dataLength, 4);
+          wavHeader.write("WAVE", 8);
+          wavHeader.write("fmt ", 12);
+          wavHeader.writeUInt32LE(16, 16);
+          wavHeader.writeUInt16LE(1, 20); // 1 = PCM
+          wavHeader.writeUInt16LE(1, 22); // mono
+          wavHeader.writeUInt32LE(sRate, 24);
+          wavHeader.writeUInt32LE(sRate * 2, 28); // sample rate * 2 bytes/sample * 1 channel
+          wavHeader.writeUInt16LE(2, 32); // mono 16-bit is 2 bytes
+          wavHeader.writeUInt16LE(16, 34); // 16-bit
+          wavHeader.write("data", 36);
+          wavHeader.writeUInt32LE(dataLength, 40);
+
+          return Buffer.concat([wavHeader, pcmBuffer]);
+        };
+
+        audioBuffer = wrapPcmInWav(audioBuffer, sampleRate);
+      }
+
+      // Write unique file inside process.cwd()/audio
+      const filename = `${slot}_voice_${Date.now()}.wav`;
+      const filePath = path.join(audioDir, filename);
+      fs.writeFileSync(filePath, audioBuffer);
+      const audioUrl = `/audio/${filename}`;
+
+      // Calculate playtime duration of WAV/PCM data exactly
+      const rawPcmLength = isPcm ? audioBuffer.length - 44 : audioBuffer.length;
+      const durationMs = Math.round((rawPcmLength / (sampleRate * 2)) * 1000);
+      const latencyMs = Date.now() - startTime;
+      const nextRunCount = (voiceProcessRunCount || 0) + 1;
+      const characterCount = text.length;
+      const cumulativeCharacters = (cumulativeVoiceCharacters || 0) + characterCount;
+
+      res.json({
+        audioUrl,
+        durationMs,
+        latencyMs,
+        characterCount,
+        voiceProcessRunCount: nextRunCount,
+        cumulativeVoiceCharacters: cumulativeCharacters,
+        lastVoiceProcessAt: new Date().toISOString()
+      });
+    } catch (err: any) {
+      console.error("[Voice Generation Error]", err);
+      res.status(500).json({
+        error: "Internal Server Error",
+        message: err.message || "An unexpected error occurred during voice generation.",
         status: 500
       });
     }

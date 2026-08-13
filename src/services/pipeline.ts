@@ -63,8 +63,7 @@ export class RealScriptService implements IScriptService {
 
 export class MockVoiceService implements IVoiceService {
   async generateVoice(script: string, voiceId: string): Promise<string> {
-    await new Promise((resolve) => setTimeout(resolve, 1800));
-    return `https://dummy-audio-url.mp3?voice=${voiceId}&text=${encodeURIComponent(script.substring(0, 20))}`;
+    throw new Error("Voice synthesis is in Foundation phase. Please approve a voice provider before attempting synthesis.");
   }
 }
 

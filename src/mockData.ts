@@ -17,14 +17,20 @@ export const initialMockJob: QuoteJob = {
   femaleVoice: {
     voiceId: "V1-F-Sienna",
     name: "Sienna (Warm, Professional)",
-    status: "GENERATED",
-    duration: "0:15"
+    status: "PENDING",
+    audioUrl: undefined,
+    duration: undefined,
+    audioUrlOrRef: null,
+    durationMs: null
   },
   maleVoice: {
     voiceId: "V1-M-Marcus",
     name: "Marcus (Deep, Cinematic)",
-    status: "GENERATED",
-    duration: "0:14"
+    status: "PENDING",
+    audioUrl: undefined,
+    duration: undefined,
+    audioUrlOrRef: null,
+    durationMs: null
   },
   videoStatus: "READY",
   videoUrl: "https://assets.mixkit.co/videos/preview/mixkit-forest-stream-in-the-sunlight-529-large.mp4", // Standard stock video preview
@@ -50,5 +56,15 @@ export const initialMockJob: QuoteJob = {
   cumulativeScriptOutputTokens: 0,
   cumulativeScriptTotalTokens: 0,
   scriptEstimatedCost: null,
-  language: "en"
+  language: "en",
+  // Build 7 Stage 5 Voice Foundation Properties
+  voiceSourceType: "SCRIPT_A",
+  voiceSourceTextSnapshot: null,
+  voiceProvider: null,
+  voiceEngine: null,
+  voiceProcessRunCount: 0,
+  lastVoiceProcessAt: null,
+  lastVoiceLatencyMs: null,
+  cumulativeVoiceCharacters: 0,
+  voiceEstimatedCost: null
 };

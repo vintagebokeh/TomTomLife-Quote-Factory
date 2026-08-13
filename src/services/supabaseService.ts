@@ -50,6 +50,22 @@ export interface QuoteJobRow {
   cumulative_script_total_tokens?: number;
   script_estimated_cost?: number | null;
   language?: string;
+  // Build 7 Stage 5 Voice Foundation Columns
+  female_voice_status?: string | null;
+  male_voice_status?: string | null;
+  female_audio_url_or_ref?: string | null;
+  male_audio_url_or_ref?: string | null;
+  female_duration_ms?: number | null;
+  male_duration_ms?: number | null;
+  voice_source_type?: string | null;
+  voice_source_text_snapshot?: string | null;
+  voice_provider?: string | null;
+  voice_engine?: string | null;
+  voice_process_run_count?: number;
+  last_voice_process_at?: string | null;
+  last_voice_latency_ms?: number | null;
+  cumulative_voice_characters?: number;
+  voice_estimated_cost?: number | null;
 }
 
 export function mapRowToJob(row: QuoteJobRow): QuoteJob {
@@ -68,16 +84,22 @@ export function mapRowToJob(row: QuoteJobRow): QuoteJob {
       scriptC: row.script_c,
     },
     femaleVoice: {
-      voiceId: row.female_voice_id,
+      voiceId: row.female_voice_id || "V1-F-Sienna",
       name: "Sienna (Warm, Professional)",
-      status: "GENERATED",
-      duration: "0:15"
+      status: (row.female_voice_status as any) || "PENDING",
+      audioUrl: row.female_audio_url_or_ref || undefined,
+      duration: row.female_duration_ms ? `${Math.floor(row.female_duration_ms / 1000)}s` : undefined,
+      audioUrlOrRef: row.female_audio_url_or_ref || null,
+      durationMs: row.female_duration_ms || null
     },
     maleVoice: {
-      voiceId: row.male_voice_id,
+      voiceId: row.male_voice_id || "V1-M-Marcus",
       name: "Marcus (Deep, Cinematic)",
-      status: "GENERATED",
-      duration: "0:14"
+      status: (row.male_voice_status as any) || "PENDING",
+      audioUrl: row.male_audio_url_or_ref || undefined,
+      duration: row.male_duration_ms ? `${Math.floor(row.male_duration_ms / 1000)}s` : undefined,
+      audioUrlOrRef: row.male_audio_url_or_ref || null,
+      durationMs: row.male_duration_ms || null
     },
     videoStatus: "READY",
     videoUrl: "https://assets.mixkit.co/videos/preview/mixkit-forest-stream-in-the-sunlight-529-large.mp4",
@@ -106,6 +128,16 @@ export function mapRowToJob(row: QuoteJobRow): QuoteJob {
     cumulativeScriptTotalTokens: row.cumulative_script_total_tokens ?? 0,
     scriptEstimatedCost: row.script_estimated_cost || null,
     language: row.language || "en",
+    // Build 7 Stage 5 Observability & Account Mapping
+    voiceSourceType: (row.voice_source_type as any) || "SCRIPT_A",
+    voiceSourceTextSnapshot: row.voice_source_text_snapshot || null,
+    voiceProvider: row.voice_provider || null,
+    voiceEngine: row.voice_engine || null,
+    voiceProcessRunCount: row.voice_process_run_count ?? 0,
+    lastVoiceProcessAt: row.last_voice_process_at || null,
+    lastVoiceLatencyMs: row.last_voice_latency_ms || null,
+    cumulativeVoiceCharacters: row.cumulative_voice_characters ?? 0,
+    voiceEstimatedCost: row.voice_estimated_cost || null,
   };
 }
 
@@ -148,6 +180,22 @@ export function mapJobToRow(job: QuoteJob): QuoteJobRow {
     cumulative_script_total_tokens: job.cumulativeScriptTotalTokens,
     script_estimated_cost: job.scriptEstimatedCost || null,
     language: job.language || "en",
+    // Build 7 Stage 5 Voice Foundation Mappings
+    female_voice_status: job.femaleVoice.status,
+    male_voice_status: job.maleVoice.status,
+    female_audio_url_or_ref: job.femaleVoice.audioUrlOrRef || null,
+    male_audio_url_or_ref: job.maleVoice.audioUrlOrRef || null,
+    female_duration_ms: job.femaleVoice.durationMs || null,
+    male_duration_ms: job.maleVoice.durationMs || null,
+    voice_source_type: job.voiceSourceType || null,
+    voice_source_text_snapshot: job.voiceSourceTextSnapshot || null,
+    voice_provider: job.voiceProvider || null,
+    voice_engine: job.voiceEngine || null,
+    voice_process_run_count: job.voiceProcessRunCount || 0,
+    last_voice_process_at: job.lastVoiceProcessAt || null,
+    last_voice_latency_ms: job.lastVoiceLatencyMs || null,
+    cumulative_voice_characters: job.cumulativeVoiceCharacters || 0,
+    voice_estimated_cost: job.voiceEstimatedCost || null,
   };
 }
 

@@ -109,6 +109,7 @@ export default function App() {
 
   // Audio simulation refs/state for visual feedback
   const animationFrameId = useRef<number | null>(null);
+  const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
   const [audioWaveform, setAudioWaveform] = useState<number[]>([12, 24, 8, 16, 40, 18, 30, 10]);
 
   // Auto-notification helper
@@ -346,31 +347,21 @@ export default function App() {
         notify("Script generation is a real Gemma action in Build 6. Please run Stage 4 Script Generation manually to continue.", "info");
         return;
       } else if (job.status === "SCRIPT_READY") {
-        // Voice Slot synthesis (Stage 5)
-        setJob((prev) => {
-          const next = {
-            ...prev,
-            femaleVoice: { ...prev.femaleVoice, status: "GENERATED" as const },
-            maleVoice: { ...prev.maleVoice, status: "GENERATED" as const },
-            status: "VIDEO_READY" as JobStatus
-          };
-          nextJob = next;
-          return next;
-        });
-        notify("V1 Voice slots generated successfully.", "success");
+        // Halt simulator for manual/real Voice generation foundation in Build 7
+        setIsSimulating(false);
+        notify("Voice synthesis is in Foundation phase. Please execute Stage 5 Voice generation manually to progress.", "info");
+        return;
       } else if (job.status === "AUDIO_READY") {
-        // Voice Slot synthesis
+        // Video ready step
         setJob((prev) => {
           const next = {
             ...prev,
-            femaleVoice: { ...prev.femaleVoice, status: "GENERATED" as const },
-            maleVoice: { ...prev.maleVoice, status: "GENERATED" as const },
             status: "VIDEO_READY" as JobStatus
           };
           nextJob = next;
           return next;
         });
-        notify("V1 Voice slots generated successfully.", "success");
+        notify("Voices are ready. Proceeding to Video compilation.", "success");
       } else if (job.status === "VIDEO_READY") {
         // Video render step
         setIsRenderingVideo(true);
@@ -864,15 +855,20 @@ export default function App() {
         scriptB: "",
         scriptC: ""
       },
+      voiceSourceTextSnapshot: null,
       femaleVoice: {
         ...prevJob.femaleVoice,
         status: "PENDING",
-        audioUrl: undefined
+        audioUrl: undefined,
+        audioUrlOrRef: null,
+        durationMs: null
       },
       maleVoice: {
         ...prevJob.maleVoice,
         status: "PENDING",
-        audioUrl: undefined
+        audioUrl: undefined,
+        audioUrlOrRef: null,
+        durationMs: null
       },
       status: "TEXT_READY"
     };
@@ -991,11 +987,14 @@ export default function App() {
       const freshJob = jobRef.current;
 
       if (autoAcceptAiText) {
+        setScriptCandidates(null);
+        const invalidatedJob = invalidateScriptsAndDownstream(freshJob);
         const updatedJob: QuoteJob = {
-          ...freshJob,
+          ...invalidatedJob,
           status: "TEXT_READY",
           cleanText: clean_text,
           coreMeaning: core_meaning,
+          language: language,
           textProcessRunCount: data.textProcessRunCount ?? ((freshJob.textProcessRunCount || 0) + 1),
           lastTextProcessAt: data.last_text_process_at || new Date().toISOString(),
           lastInputTokens: data.last_input_tokens,
@@ -1071,11 +1070,14 @@ export default function App() {
       return;
     }
 
+    setScriptCandidates(null);
+    const invalidatedJob = invalidateScriptsAndDownstream(jobRef.current);
     const updatedJob: QuoteJob = {
-      ...jobRef.current,
+      ...invalidatedJob,
       status: "TEXT_READY",
       cleanText: aiCandidate.cleanText,
-      coreMeaning: aiCandidate.coreMeaning
+      coreMeaning: aiCandidate.coreMeaning,
+      language: aiCandidate.language
     };
     delete updatedJob.failedStage;
     delete updatedJob.errorMessage;
@@ -1298,21 +1300,31 @@ export default function App() {
 
   const handleScriptChange = (variant: "scriptA" | "scriptB" | "scriptC", text: string) => {
     setJob((prev) => {
+      const isCurrentlySelected = 
+        (variant === "scriptA" && prev.voiceSourceType === "SCRIPT_A") ||
+        (variant === "scriptB" && prev.voiceSourceType === "SCRIPT_B") ||
+        (variant === "scriptC" && prev.voiceSourceType === "SCRIPT_C");
+
       const next = {
         ...prev,
         scripts: {
           ...prev.scripts,
           [variant]: text
         },
+        voiceSourceTextSnapshot: isCurrentlySelected ? text : prev.voiceSourceTextSnapshot,
         femaleVoice: {
           ...prev.femaleVoice,
           status: "PENDING" as const,
-          audioUrl: undefined
+          audioUrl: undefined,
+          audioUrlOrRef: null,
+          durationMs: null
         },
         maleVoice: {
           ...prev.maleVoice,
           status: "PENDING" as const,
-          audioUrl: undefined
+          audioUrl: undefined,
+          audioUrlOrRef: null,
+          durationMs: null
         }
       };
       setHasUnsavedChanges(true);
@@ -1320,13 +1332,208 @@ export default function App() {
     });
   };
 
+  const handleVoiceSourceChange = async (sourceType: "SCRIPT_A" | "SCRIPT_B" | "SCRIPT_C" | "CLEAN_TEXT") => {
+    setJob((prev) => {
+      let sourceText = "";
+      if (sourceType === "SCRIPT_A") sourceText = prev.scripts.scriptA;
+      else if (sourceType === "SCRIPT_B") sourceText = prev.scripts.scriptB;
+      else if (sourceType === "SCRIPT_C") sourceText = prev.scripts.scriptC;
+      else if (sourceType === "CLEAN_TEXT") sourceText = prev.cleanText;
+
+      const next: QuoteJob = {
+        ...prev,
+        voiceSourceType: sourceType,
+        voiceSourceTextSnapshot: sourceText,
+        femaleVoice: {
+          ...prev.femaleVoice,
+          status: "PENDING" as const,
+          audioUrl: undefined,
+          audioUrlOrRef: null,
+          durationMs: null
+        },
+        maleVoice: {
+          ...prev.maleVoice,
+          status: "PENDING" as const,
+          audioUrl: undefined,
+          audioUrlOrRef: null,
+          durationMs: null
+        }
+      };
+      setHasUnsavedChanges(true);
+
+      if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+        saveJobToDb(next);
+      }
+
+      return next;
+    });
+    notify(`Voice over source changed to ${sourceType.replace("_", " ")}. Generated voice tracks are reset.`, "info");
+  };
+
   // Toggle voice audio simulator play
   const togglePlayVoice = (voice: "female" | "male") => {
     if (playingVoice === voice) {
+      if (audioPlayerRef.current) {
+        audioPlayerRef.current.pause();
+        audioPlayerRef.current = null;
+      }
       setPlayingVoice(null);
     } else {
+      if (audioPlayerRef.current) {
+        audioPlayerRef.current.pause();
+        audioPlayerRef.current = null;
+      }
+
+      const voiceData = voice === "female" ? job.femaleVoice : job.maleVoice;
+      if (!voiceData.audioUrlOrRef) {
+        notify("No generated audio track found for preview.", "error");
+        return;
+      }
+
       setPlayingVoice(voice);
       setPlayingVideo(false);
+
+      const audio = new Audio(voiceData.audioUrlOrRef);
+      audioPlayerRef.current = audio;
+      audio.play().catch((err) => {
+        console.error("Audio playback failed:", err);
+        notify("Failed to play preview audio track.", "error");
+        setPlayingVoice(null);
+      });
+
+      audio.onended = () => {
+        setPlayingVoice(null);
+        audioPlayerRef.current = null;
+      };
+    }
+  };
+
+  const handleSynthesize = async (slot: "female" | "male") => {
+    const freshJob = jobRef.current;
+    if (freshJob.status !== "SCRIPT_READY" && freshJob.status !== "AUDIO_READY") {
+      notify("Synthesis requires the job status to be SCRIPT_READY.", "error");
+      return;
+    }
+
+    const voiceId = slot === "female" ? freshJob.femaleVoice.voiceId : freshJob.maleVoice.voiceId;
+    
+    let text = "";
+    if (freshJob.voiceSourceType === "SCRIPT_A") text = freshJob.scripts.scriptA;
+    else if (freshJob.voiceSourceType === "SCRIPT_B") text = freshJob.scripts.scriptB;
+    else if (freshJob.voiceSourceType === "SCRIPT_C") text = freshJob.scripts.scriptC;
+    else if (freshJob.voiceSourceType === "CLEAN_TEXT") text = freshJob.cleanText;
+
+    if (!text || text.trim() === "") {
+      notify(`Selected voice source text (${freshJob.voiceSourceType || "default"}) is empty. Cannot synthesize.`, "error");
+      return;
+    }
+
+    const textSnapshot = text;
+
+    setJob((prev) => {
+      const updated = { ...prev };
+      if (slot === "female") {
+        updated.femaleVoice = { ...updated.femaleVoice, status: "PROCESSING" };
+      } else {
+        updated.maleVoice = { ...updated.maleVoice, status: "PROCESSING" };
+      }
+      return updated;
+    });
+
+    try {
+      notify(`Synthesizing ${slot} voice with Gemini TTS...`, "info");
+      
+      const response = await fetch("/api/generate-voice", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          text,
+          language: freshJob.language || "en",
+          slot,
+          voiceId,
+          voiceProcessRunCount: freshJob.voiceProcessRunCount,
+          cumulativeVoiceCharacters: freshJob.cumulativeVoiceCharacters
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || `Server returned status ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      setJob((prev) => {
+        const nextJob = { ...prev };
+        
+        if (slot === "female") {
+          nextJob.femaleVoice = {
+            ...nextJob.femaleVoice,
+            status: "GENERATED",
+            audioUrlOrRef: data.audioUrl,
+            audioUrl: data.audioUrl,
+            durationMs: data.durationMs,
+            duration: `${Math.floor(data.durationMs / 1000)}s`
+          };
+        } else {
+          nextJob.maleVoice = {
+            ...nextJob.maleVoice,
+            status: "GENERATED",
+            audioUrlOrRef: data.audioUrl,
+            audioUrl: data.audioUrl,
+            durationMs: data.durationMs,
+            duration: `${Math.floor(data.durationMs / 1000)}s`
+          };
+        }
+
+        nextJob.voiceSourceTextSnapshot = textSnapshot;
+        nextJob.voiceSourceType = prev.voiceSourceType || "SCRIPT_A";
+        nextJob.voiceProvider = "google-gemini-api";
+        nextJob.voiceEngine = "gemini-2.5-flash-preview-tts";
+
+        nextJob.voiceProcessRunCount = data.voiceProcessRunCount;
+        nextJob.lastVoiceProcessAt = data.lastVoiceProcessAt;
+        nextJob.lastVoiceLatencyMs = data.latencyMs;
+        nextJob.cumulativeVoiceCharacters = data.cumulativeVoiceCharacters;
+        
+        // Cost: $0.015 per 1,000 characters
+        nextJob.voiceEstimatedCost = Number((nextJob.cumulativeVoiceCharacters * 0.000015).toFixed(6));
+
+        if (nextJob.femaleVoice.status === "GENERATED" && nextJob.maleVoice.status === "GENERATED") {
+          nextJob.status = "AUDIO_READY";
+        } else {
+          nextJob.status = "SCRIPT_READY";
+        }
+
+        notify(`Synthesized ${slot} track successfully!`, "success");
+
+        if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+          saveJobToDb(nextJob);
+        }
+
+        return nextJob;
+      });
+
+    } catch (err: any) {
+      const errMsg = err.message || `Failed to synthesize ${slot} voice track.`;
+      notify(`Synthesis Error: ${errMsg}`, "error");
+
+      setJob((prev) => {
+        const nextJob = { ...prev };
+        if (slot === "female") {
+          nextJob.femaleVoice = { ...nextJob.femaleVoice, status: "PENDING" };
+        } else {
+          nextJob.maleVoice = { ...nextJob.maleVoice, status: "PENDING" };
+        }
+
+        if (supabaseService.isConfigured() && dbStatus === "CONNECTED") {
+          saveJobToDb(nextJob);
+        }
+
+        return nextJob;
+      });
     }
   };
 
@@ -2569,15 +2776,52 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
               <div className="border-b border-slate-200/60 bg-white px-5 py-3.5 flex items-center justify-between">
                 <div className="flex items-center space-x-2.5">
                   <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-50 border border-blue-100 text-blue-600 text-[11px] font-bold">5</span>
-                  <h3 className="font-black text-slate-400 tracking-widest text-[10px] uppercase">VOICE GENERATION</h3>
+                  <h3 className="font-black text-slate-400 tracking-widest text-[10px] uppercase">VOICE GENERATION FOUNDATION</h3>
                 </div>
-                <span className="text-[10px] text-slate-400 font-mono tracking-wider">Fixed V1 Voice Slots</span>
+                <span className="text-[10px] text-slate-400 font-mono tracking-wider">Provider-Neutral Contract</span>
               </div>
 
-              <div className="p-5">
-                <p className="text-[11px] text-slate-500 mb-4">
-                  Generate high-fidelity audio versions of the selected script variants using fixed voice profiles. Select a track to preview voice output.
-                </p>
+              <div className="p-5 space-y-6">
+                <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-4.5 space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[10px] font-black tracking-widest text-slate-400 uppercase mb-1.5">
+                        Canonical Synthesis Source
+                      </label>
+                      <select
+                        value={job.voiceSourceType || "SCRIPT_A"}
+                        onChange={(e) => handleVoiceSourceChange(e.target.value as any)}
+                        className="w-full p-2 bg-white text-slate-800 text-xs rounded-lg border border-slate-200 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition cursor-pointer"
+                        id="select-voice-source"
+                      >
+                        <option value="SCRIPT_A">Script A (Modern Display / Core)</option>
+                        <option value="SCRIPT_B">Script B (Hook First)</option>
+                        <option value="SCRIPT_C">Script C (Short Attention)</option>
+                        <option value="CLEAN_TEXT">Cleaned Up OCR Text</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-black tracking-widest text-slate-400 uppercase mb-1.5">
+                        Active TTS Voice Provider
+                      </label>
+                      <div className="bg-white px-3 py-2 border border-slate-200 rounded-lg text-xs text-slate-600 flex items-center space-x-2 font-mono" id="voice-provider-placeholder">
+                        <span className="inline-block w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                        <span>Neutral Foundation (Awaiting Integration Approval)</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Provenance snapshot rendering */}
+                  <div className="space-y-1">
+                    <span className="text-[9px] font-black tracking-widest text-slate-400 uppercase">
+                      Synthesis Source Text Provenance Snapshot
+                    </span>
+                    <div className="p-3 bg-white border border-slate-200/60 rounded-lg max-h-24 overflow-y-auto text-xs text-slate-600 whitespace-pre-wrap italic font-sans" id="voice-snapshot-box">
+                      {job.voiceSourceTextSnapshot || (job.voiceSourceType === "SCRIPT_A" ? job.scripts.scriptA : job.voiceSourceType === "SCRIPT_B" ? job.scripts.scriptB : job.voiceSourceType === "SCRIPT_C" ? job.scripts.scriptC : job.cleanText) || "No source text snapshot captured yet."}
+                    </div>
+                  </div>
+                </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   
@@ -2592,6 +2836,8 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                       <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider ${
                         job.femaleVoice.status === "GENERATED" 
                           ? "bg-emerald-50 text-emerald-700 border border-emerald-200" 
+                          : job.femaleVoice.status === "PROCESSING"
+                          ? "bg-blue-50 text-blue-700 border border-blue-200 animate-pulse"
                           : "bg-amber-50 text-amber-700 border border-amber-200"
                       }`}>
                         {job.femaleVoice.status}
@@ -2620,11 +2866,14 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
 
                       {/* Play Control Placeholder */}
                       <button
+                        disabled={job.femaleVoice.status !== "GENERATED"}
                         onClick={() => togglePlayVoice("female")}
-                        className={`mt-2 w-full flex items-center justify-center space-x-1.5 py-1.5 px-3 rounded-lg text-xs font-semibold border transition cursor-pointer ${
-                          playingVoice === "female"
-                            ? "bg-blue-50 border-blue-200 text-blue-700"
-                            : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                        className={`mt-2 w-full flex items-center justify-center space-x-1.5 py-1.5 px-3 rounded-lg text-xs font-semibold border transition ${
+                          job.femaleVoice.status !== "GENERATED"
+                            ? "bg-slate-50 border-slate-100 text-slate-300 cursor-not-allowed"
+                            : playingVoice === "female"
+                            ? "bg-blue-50 border-blue-200 text-blue-700 cursor-pointer"
+                            : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
                         }`}
                         id="btn-play-female"
                       >
@@ -2637,6 +2886,30 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                           <>
                             <Play className="h-3.5 w-3.5 fill-current" />
                             <span>Preview Female voice</span>
+                          </>
+                        )}
+                      </button>
+
+                      {/* Synthesize Button */}
+                      <button
+                        id="btn-synthesize-female"
+                        disabled={job.femaleVoice.status === "PROCESSING" || (job.status !== "SCRIPT_READY" && job.status !== "AUDIO_READY")}
+                        onClick={() => handleSynthesize("female")}
+                        className={`mt-2 w-full flex items-center justify-center space-x-1.5 py-1.5 px-3 rounded-lg text-xs font-semibold border transition ${
+                          job.femaleVoice.status === "PROCESSING" || (job.status !== "SCRIPT_READY" && job.status !== "AUDIO_READY")
+                            ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
+                            : "bg-blue-600 border-blue-600 text-white hover:bg-blue-700 cursor-pointer"
+                        }`}
+                      >
+                        {job.femaleVoice.status === "PROCESSING" ? (
+                          <>
+                            <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            <span>Synthesizing...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="h-3.5 w-3.5" />
+                            <span>SYNTHESIZE FEMALE</span>
                           </>
                         )}
                       </button>
@@ -2654,6 +2927,8 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                       <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider ${
                         job.maleVoice.status === "GENERATED" 
                           ? "bg-emerald-50 text-emerald-700 border border-emerald-200" 
+                          : job.maleVoice.status === "PROCESSING"
+                          ? "bg-blue-50 text-blue-700 border border-blue-200 animate-pulse"
                           : "bg-amber-50 text-amber-700 border border-amber-200"
                       }`}>
                         {job.maleVoice.status}
@@ -2682,11 +2957,14 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
 
                       {/* Play Control Placeholder */}
                       <button
+                        disabled={job.maleVoice.status !== "GENERATED"}
                         onClick={() => togglePlayVoice("male")}
-                        className={`mt-2 w-full flex items-center justify-center space-x-1.5 py-1.5 px-3 rounded-lg text-xs font-semibold border transition cursor-pointer ${
-                          playingVoice === "male"
-                            ? "bg-blue-50 border-blue-200 text-blue-700"
-                            : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                        className={`mt-2 w-full flex items-center justify-center space-x-1.5 py-1.5 px-3 rounded-lg text-xs font-semibold border transition ${
+                          job.maleVoice.status !== "GENERATED"
+                            ? "bg-slate-50 border-slate-100 text-slate-300 cursor-not-allowed"
+                            : playingVoice === "male"
+                            ? "bg-blue-50 border-blue-200 text-blue-700 cursor-pointer"
+                            : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50 cursor-pointer"
                         }`}
                         id="btn-play-male"
                       >
@@ -2702,9 +2980,53 @@ ON quote_jobs FOR ALL USING (true) WITH CHECK (true);`}
                           </>
                         )}
                       </button>
+
+                      {/* Synthesize Button */}
+                      <button
+                        id="btn-synthesize-male"
+                        disabled={job.maleVoice.status === "PROCESSING" || (job.status !== "SCRIPT_READY" && job.status !== "AUDIO_READY")}
+                        onClick={() => handleSynthesize("male")}
+                        className={`mt-2 w-full flex items-center justify-center space-x-1.5 py-1.5 px-3 rounded-lg text-xs font-semibold border transition ${
+                          job.maleVoice.status === "PROCESSING" || (job.status !== "SCRIPT_READY" && job.status !== "AUDIO_READY")
+                            ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
+                            : "bg-blue-600 border-blue-600 text-white hover:bg-blue-700 cursor-pointer"
+                        }`}
+                      >
+                        {job.maleVoice.status === "PROCESSING" ? (
+                          <>
+                            <span className="inline-block w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            <span>Synthesizing...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="h-3.5 w-3.5" />
+                            <span>SYNTHESIZE MALE</span>
+                          </>
+                        )}
+                      </button>
                     </div>
                   </div>
 
+                </div>
+
+                {/* Stage 5 Observability Panel */}
+                <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200/60 grid grid-cols-2 md:grid-cols-4 gap-4 text-center font-mono text-[10px] text-slate-500" id="voice-observability-panel">
+                  <div>
+                    <span className="block text-[8px] font-black uppercase text-slate-400 mb-0.5">Synthesis Runs</span>
+                    <span className="font-bold text-slate-700">{job.voiceProcessRunCount || 0}</span>
+                  </div>
+                  <div>
+                    <span className="block text-[8px] font-black uppercase text-slate-400 mb-0.5">Last Synthesized At</span>
+                    <span className="font-bold text-slate-700">{job.lastVoiceProcessAt ? new Date(job.lastVoiceProcessAt).toLocaleTimeString() : "Never"}</span>
+                  </div>
+                  <div>
+                    <span className="block text-[8px] font-black uppercase text-slate-400 mb-0.5">Last Run Latency</span>
+                    <span className="font-bold text-slate-700">{job.lastVoiceLatencyMs ? `${job.lastVoiceLatencyMs} ms` : "0 ms"}</span>
+                  </div>
+                  <div>
+                    <span className="block text-[8px] font-black uppercase text-slate-400 mb-0.5">Est. Characters</span>
+                    <span className="font-bold text-slate-700">{job.cumulativeVoiceCharacters || 0} chars</span>
+                  </div>
                 </div>
               </div>
             </section>            {/* Section 6: VIDEO COMPOSITION */}

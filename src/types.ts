@@ -20,6 +20,8 @@ export interface VoiceSlot {
   status: "PENDING" | "GENERATING" | "GENERATED" | "FAILED";
   audioUrl?: string;
   duration?: string;
+  audioUrlOrRef?: string | null; // Build 7 Foundation
+  durationMs?: number | null; // Build 7 Foundation
 }
 
 export interface ScriptVariants {
@@ -67,6 +69,16 @@ export interface QuoteJob {
   cumulativeScriptTotalTokens: number;
   scriptEstimatedCost?: number | null;
   language?: string;
+  // Build 7 Stage 5 Voice Foundation Properties
+  voiceSourceType?: "SCRIPT_A" | "SCRIPT_B" | "SCRIPT_C" | "CLEAN_TEXT" | null;
+  voiceSourceTextSnapshot?: string | null;
+  voiceProvider?: string | null;
+  voiceEngine?: string | null;
+  voiceProcessRunCount?: number;
+  lastVoiceProcessAt?: string | null;
+  lastVoiceLatencyMs?: number | null;
+  cumulativeVoiceCharacters?: number;
+  voiceEstimatedCost?: number | null;
 }
 
 // Clean service boundaries to be connected incrementally in later builds
